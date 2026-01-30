@@ -223,30 +223,93 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
 </head>
 <body>
     <div id="app" class="loading"><div class="spinner"></div> Loading stock data...</div>
+    <div id="debug" style="position:fixed;bottom:0;left:0;right:0;background:#1e293b;color:#94a3b8;font-size:11px;padding:8px;max-height:100px;overflow:auto;display:none;"></div>
     
     <script>
         let currentData = null;
         let currentTicker = null;
         let currentPeriod = '1mo';
         let requestId = 1;
+        let initialized = false;
+        let messageLog = [];
         
-        // Listen for messages from host
+        function log(msg) {
+            console.log('[StockCard]', msg);
+            messageLog.push(msg);
+            const debug = document.getElementById('debug');
+            debug.style.display = 'block';
+            debug.innerHTML = messageLog.slice(-10).map(m => typeof m === 'object' ? JSON.stringify(m) : m).join('<br>');
+        }
+        
+        log('UI loaded, waiting for data...');
+        
+        // Listen for ALL messages from host
         window.addEventListener('message', function(event) {
             const data = event.data;
+            log('MSG: ' + JSON.stringify(data).substring(0, 200));
             
-            // Handle tool result notification
+            // Try multiple ways to extract the data
+            let stockData = null;
+            
+            // Method 1: ui/notifications/tool-result with structuredContent
             if (data.method === 'ui/notifications/tool-result' && data.params?.structuredContent) {
-                currentData = data.params.structuredContent;
+                stockData = data.params.structuredContent;
+                log('Found via tool-result structuredContent');
+            }
+            // Method 2: Direct structuredContent on data
+            else if (data.structuredContent) {
+                stockData = data.structuredContent;
+                log('Found via direct structuredContent');
+            }
+            // Method 3: result field
+            else if (data.result?.structuredContent) {
+                stockData = data.result.structuredContent;
+                log('Found via result.structuredContent');
+            }
+            // Method 4: params directly has the data
+            else if (data.params?.ticker) {
+                stockData = data.params;
+                log('Found via params');
+            }
+            // Method 5: data directly has ticker
+            else if (data.ticker) {
+                stockData = data;
+                log('Found via direct data');
+            }
+            
+            if (stockData && stockData.ticker) {
+                currentData = stockData;
                 currentTicker = currentData.ticker;
                 currentPeriod = currentData.period || '1mo';
+                log('Rendering stock: ' + currentTicker);
                 renderStock(currentData);
             }
+            
             // Handle tool input notification
             if (data.method === 'ui/notifications/tool-input' && data.params?.arguments) {
                 currentTicker = data.params.arguments.ticker;
                 currentPeriod = data.params.arguments.period || '1mo';
+                log('Got tool-input: ' + currentTicker);
+            }
+            // Handle initialize response
+            if (data.id && data.result) {
+                initialized = true;
+                log('Initialized');
             }
         });
+        
+        // Timeout: show message if no data after 5 seconds
+        setTimeout(() => {
+            if (!currentData) {
+                document.getElementById('app').innerHTML = `
+                    <div style="text-align:center;padding:20px;">
+                        <div style="color:#f59e0b;font-size:18px;margin-bottom:12px;">⏳ Waiting for data...</div>
+                        <div style="color:#94a3b8;font-size:13px;">Messages received: ${messageLog.length}</div>
+                        <div style="color:#64748b;font-size:12px;margin-top:8px;">See debug panel below</div>
+                    </div>
+                `;
+            }
+        }, 5000);
         
         // Send initialize request
         window.parent.postMessage({
@@ -995,14 +1058,56 @@ async def list_resources():
 
 @app.read_resource()
 async def read_resource(uri: str):
-    """Read a UI resource. Returns the HTML content as a string."""
+    """Read a UI resource. Returns the HTML content with embedded data if available."""
     uri_str = str(uri)  # Convert AnyUrl to string if needed
     import sys
     print(f"[DEBUG] read_resource called with uri: {repr(uri_str)}", file=sys.stderr)
     
     if uri_str == "ui://yfinance/stock-card":
+        # Embed the last stock data into the HTML so it renders immediately
+        if _last_stock_data:
+            data_json = json.dumps(_last_stock_data)
+            # Inject the data into the HTML
+            html = STOCK_CARD_HTML.replace(
+                'let currentData = null;',
+                f'let currentData = {data_json};'
+            ).replace(
+                'let currentTicker = null;',
+                f'let currentTicker = "{_last_stock_data.get("ticker", "")}";'
+            ).replace(
+                "let currentPeriod = '1mo';",
+                f"let currentPeriod = '{_last_stock_data.get('period', '1mo')}';"
+            )
+            # Add auto-render on load
+            html = html.replace(
+                "log('UI loaded, waiting for data...');",
+                "log('UI loaded with embedded data'); if (currentData) { renderStock(currentData); }"
+            )
+            print(f"[DEBUG] Returning HTML with embedded data for {_last_stock_data.get('ticker')}", file=sys.stderr)
+            return html
         return STOCK_CARD_HTML
     elif uri_str == "ui://yfinance/comparison":
+        # Embed the last comparison data into the HTML
+        if _last_comparison_data:
+            data_json = json.dumps(_last_comparison_data)
+            tickers_json = json.dumps(_last_comparison_data.get("tickers", []))
+            html = COMPARISON_HTML.replace(
+                'let currentData = null;',
+                f'let currentData = {data_json};'
+            ).replace(
+                'let currentTickers = [];',
+                f'let currentTickers = {tickers_json};'
+            ).replace(
+                "let currentPeriod = '1mo';",
+                f"let currentPeriod = '{_last_comparison_data.get('period', '1mo')}';"
+            )
+            # Add auto-render on load
+            html = html.replace(
+                "log('Comparison UI loaded');",
+                "log('Comparison UI loaded with embedded data'); if (currentData) { renderComparison(currentData); }"
+            )
+            print(f"[DEBUG] Returning HTML with embedded comparison data", file=sys.stderr)
+            return html
         return COMPARISON_HTML
     else:
         print(f"[DEBUG] Unknown resource URI: {repr(uri_str)}", file=sys.stderr)
@@ -1356,6 +1461,7 @@ async def list_tools():
 @app.call_tool()
 async def call_tool(name: str, arguments: dict):
     """Handle tool calls - return structured data for the UI."""
+    global _last_stock_data, _last_comparison_data
     
     period_labels = {
         "1d": "Today", "5d": "5 days", "1mo": "1 month", "3mo": "3 months",
@@ -1400,6 +1506,9 @@ async def call_tool(name: str, arguments: dict):
                 "period": period,
                 "periodLabel": period_labels.get(period, period)
             }
+            
+            # Store for embedding in UI resource
+            _last_stock_data = structured_data
             
             # Return structuredContent - VS Code MCP Apps will fetch the UI from the tool's _meta.ui.resourceUri
             # and post this data to it via postMessage
@@ -1454,8 +1563,12 @@ async def call_tool(name: str, arguments: dict):
             structured_data = {
                 "stocks": stocks_data,
                 "period": period,
+                "tickers": tickers,
                 "trendLabel": trend_labels.get(period, period) + " Trend"
             }
+            
+            # Store for embedding in UI resource
+            _last_comparison_data = structured_data
             
             # Return structuredContent - VS Code MCP Apps will fetch the UI from the tool's _meta.ui.resourceUri
             tickers_str = ", ".join([s["ticker"] for s in stocks_data])
