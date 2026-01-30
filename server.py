@@ -62,30 +62,259 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
         .change { font-size: 14px; margin-top: 4px; }
         .change.positive { color: #22c55e; }
         .change.negative { color: #ef4444; }
-        .chart { margin: 12px 0; height: 100px; background: rgba(15, 23, 42, 0.3); border-radius: 8px; padding: 8px; }
+        .period-label { font-size: 11px; color: #64748b; margin-top: 2px; }
+        
+        /* Period selector */
+        .controls { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+        .period-selector { display: flex; gap: 4px; }
+        .period-btn {
+            padding: 6px 10px;
+            font-size: 11px;
+            font-weight: 500;
+            border: none;
+            border-radius: 6px;
+            background: rgba(15, 23, 42, 0.5);
+            color: #94a3b8;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        .period-btn:hover { background: rgba(51, 65, 85, 0.8); color: #f1f5f9; }
+        .period-btn.active { background: #3b82f6; color: white; }
+        
+        /* Chart with tooltip */
+        .chart-container { position: relative; height: 100px; background: rgba(15, 23, 42, 0.3); border-radius: 8px; padding: 8px; margin: 12px 0; }
+        .chart-container svg { cursor: crosshair; }
+        .tooltip {
+            position: absolute;
+            background: rgba(15, 23, 42, 0.95);
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 12px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.15s ease;
+            z-index: 10;
+            white-space: nowrap;
+        }
+        .tooltip.visible { opacity: 1; }
+        .tooltip-price { font-weight: 600; font-size: 14px; }
+        .tooltip-date { color: #64748b; margin-top: 2px; }
+        
         .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 16px; }
-        .stat { text-align: center; padding: 8px; background: rgba(15, 23, 42, 0.5); border-radius: 8px; }
+        .stat { text-align: center; padding: 8px; background: rgba(15, 23, 42, 0.5); border-radius: 8px; cursor: pointer; transition: all 0.15s ease; }
+        .stat:hover { background: rgba(51, 65, 85, 0.6); transform: translateY(-1px); }
         .stat-label { font-size: 11px; color: #64748b; text-transform: uppercase; }
         .stat-value { font-size: 14px; font-weight: 600; margin-top: 4px; }
         .loading { display: flex; align-items: center; justify-content: center; height: 200px; color: #94a3b8; }
+        
+        /* Prompt hint */
+        .prompt-hint {
+            position: fixed; bottom: 16px; left: 16px; right: 16px;
+            background: rgba(59, 130, 246, 0.9); color: white;
+            padding: 12px 16px; border-radius: 8px;
+            display: flex; justify-content: space-between; align-items: center;
+            font-size: 13px; z-index: 100;
+        }
+        .prompt-hint button {
+            padding: 6px 12px; border: none; border-radius: 6px;
+            background: white; color: #1e40af; cursor: pointer; font-weight: 500;
+        }
     </style>
 </head>
 <body>
     <div id="app" class="loading">Loading stock data...</div>
     
     <script>
+        // ===== MCP Apps JSON-RPC Communication (SEP-1865) =====
+        const pending = new Map();
+        let nextId = 1;
+        let initialized = false;
+        let hostContext = null;
+        
         let currentData = null;
         let currentTicker = null;
         let currentPeriod = '1mo';
+
+        const periods = [
+            { id: '1d', label: '1D' },
+            { id: '5d', label: '5D' },
+            { id: '1mo', label: '1M' },
+            { id: '3mo', label: '3M' },
+            { id: '6mo', label: '6M' },
+            { id: '1y', label: '1Y' }
+        ];
+
+        // JSON-RPC request helper with promise tracking
+        function request(method, params) {
+            const id = nextId++;
+            return new Promise((resolve, reject) => {
+                pending.set(id, { resolve, reject });
+                window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
+            });
+        }
+        
+        // Apply host theme/styles
+        function applyHostContext(ctx) {
+            if (!ctx) return;
+            hostContext = ctx;
+            if (ctx.theme) {
+                document.documentElement.style.colorScheme = ctx.theme;
+            }
+            if (ctx.styles?.variables) {
+                for (const [k, v] of Object.entries(ctx.styles.variables)) {
+                    document.documentElement.style.setProperty(k, v);
+                }
+            }
+        }
+
+        // Message handler for all JSON-RPC traffic
+        window.addEventListener('message', (e) => {
+            const msg = e.data;
+            if (!msg?.jsonrpc) return;
+            
+            console.log('[StockCard] Received:', msg.method || 'response', msg);
+            
+            // Handle responses to our requests
+            if (msg.id && pending.has(msg.id)) {
+                const { resolve, reject } = pending.get(msg.id);
+                pending.delete(msg.id);
+                msg.error ? reject(msg.error) : resolve(msg.result);
+                return;
+            }
+            
+            // Handle notifications from host
+            switch (msg.method) {
+                case 'ui/notifications/tool-input':
+                    // Tool arguments ready (before execution)
+                    if (msg.params?.arguments) {
+                        currentTicker = msg.params.arguments.ticker;
+                        currentPeriod = msg.params.arguments.period || '1mo';
+                        console.log('[StockCard] Tool input:', currentTicker, currentPeriod);
+                    }
+                    break;
+                    
+                case 'ui/notifications/tool-result':
+                    // Tool completed with results
+                    if (msg.params?.structuredContent) {
+                        currentData = msg.params.structuredContent;
+                        currentTicker = currentData.ticker;
+                        currentPeriod = currentData.period || '1mo';
+                        renderStock(currentData);
+                    }
+                    break;
+                    
+                case 'ui/notifications/host-context-changed':
+                    applyHostContext(msg.params);
+                    break;
+                    
+                case 'ui/notifications/tool-cancelled':
+                    console.log('[StockCard] Tool cancelled:', msg.params?.reason);
+                    break;
+            }
+        });
+
+        // Initialize handshake (required by MCP Apps spec)
+        async function initializeApp() {
+            try {
+                const result = await request('ui/initialize', { 
+                    protocolVersion: '2025-11-21',
+                    capabilities: {}
+                });
+                console.log('[StockCard] Initialize response:', result);
+                
+                // Apply host context from init response
+                if (result?.hostContext) {
+                    applyHostContext(result.hostContext);
+                }
+                
+                // Send initialized notification to complete handshake
+                window.parent.postMessage({ 
+                    jsonrpc: '2.0', 
+                    method: 'ui/notifications/initialized' 
+                }, '*');
+                
+                initialized = true;
+                console.log('[StockCard] Handshake complete');
+            } catch (e) {
+                console.error('[StockCard] Initialize failed:', e);
+            }
+        }
+        
+        // Call another MCP tool (per spec: tools/call)
+        async function callTool(name, args) {
+            if (!initialized) {
+                console.warn('[StockCard] Not initialized, cannot call tool');
+                return null;
+            }
+            try {
+                const result = await request('tools/call', { name, arguments: args });
+                console.log('[StockCard] Tool result:', result);
+                return result;
+            } catch (e) {
+                console.error('[StockCard] Tool call failed:', e);
+                return null;
+            }
+        }
+        
+        async function changePeriod(period) {
+            if (period === currentPeriod || !currentTicker) return;
+
+            console.log('[StockCard] Changing period to', period);
+
+            // Update button states immediately
+            document.querySelectorAll('.period-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.period === period);
+            });
+
+            // Try calling the tool via MCP
+            const result = await callTool('get_stock_quote', { 
+                ticker: currentTicker, 
+                period: period 
+            });
+            
+            if (result?.structuredContent) {
+                currentData = result.structuredContent;
+                currentPeriod = period;
+                renderStock(currentData);
+            } else {
+                // Fallback: show prompt hint for user to copy
+                const periodLabels = {
+                    '1d': '1 day', '5d': '5 day', '1mo': '1 month',
+                    '3mo': '3 month', '6mo': '6 month', '1y': '1 year'
+                };
+                showPromptHint(`Get ${periodLabels[period] || period} ${currentTicker} stock quote`);
+            }
+        }
+        
+        function showPromptHint(prompt) {
+            const existing = document.querySelector('.prompt-hint');
+            if (existing) existing.remove();
+            
+            const hint = document.createElement('div');
+            hint.className = 'prompt-hint';
+            hint.innerHTML = `<span>💡 Ask: "${prompt}"</span><button onclick="navigator.clipboard.writeText('${prompt}'); this.textContent='Copied!'">📋 Copy</button>`;
+            document.body.appendChild(hint);
+            setTimeout(() => hint.remove(), 6000);
+        }
         
         function renderStock(data) {
-            const app = document.getElementById('app');
-            if (!app) return;
+            const appEl = document.getElementById('app');
+            if (!appEl) return;
+            
+            currentTicker = data.ticker;
+            currentPeriod = data.period || '1mo';
             
             const changeClass = data.change >= 0 ? 'positive' : 'negative';
-            const changeSymbol = data.change >= 0 ? '\u25B2' : '\u25BC';
+            const changeSymbol = data.change >= 0 ? '▲' : '▼';
             const color = data.change >= 0 ? '#22c55e' : '#ef4444';
             
+            // Build period buttons
+            const periodButtons = periods.map(p => 
+                `<button class="period-btn ${p.id === currentPeriod ? 'active' : ''}" data-period="${p.id}" onclick="window.changePeriod('${p.id}')">${p.label}</button>`
+            ).join('');
+            
+            // Build chart with hover data
             let chartHtml = '';
             if (data.history && data.history.length >= 2) {
                 const prices = data.history;
@@ -100,11 +329,33 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
                     return `${x.toFixed(1)},${y.toFixed(1)}`;
                 }).join(' ');
                 
+                // Create invisible circles for hover
+                const circles = prices.map((p, i) => {
+                    const x = i * step;
+                    const y = 80 - ((p - minP) / rangeP * 70);
+                    return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="6" fill="transparent" data-price="${p.toFixed(2)}" data-index="${i}"/>`;
+                }).join('');
+                
+                const areaPoints = points + ' 300,85 0,85';
+                
                 chartHtml = `
-                    <div class="chart">
-                        <svg width="100%" height="80" viewBox="0 0 300 90" preserveAspectRatio="none">
-                            <polyline fill="none" stroke="${color}" stroke-width="2" points="${points}"/>
+                    <div class="chart-container" id="chartContainer">
+                        <svg width="100%" height="80" viewBox="0 0 300 90" preserveAspectRatio="none" id="chartSvg">
+                            <defs>
+                                <linearGradient id="chartGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                                    <stop offset="0%" style="stop-color:${color};stop-opacity:0.3"/>
+                                    <stop offset="100%" style="stop-color:${color};stop-opacity:0.05"/>
+                                </linearGradient>
+                            </defs>
+                            <polygon fill="url(#chartGradient)" points="${areaPoints}"/>
+                            <polyline fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" points="${points}"/>
+                            <circle id="hoverCircle" cx="0" cy="0" r="4" fill="${color}" stroke="white" stroke-width="2" style="display:none"/>
+                            ${circles}
                         </svg>
+                        <div class="tooltip" id="tooltip">
+                            <div class="tooltip-price" id="tooltipPrice"></div>
+                            <div class="tooltip-date" id="tooltipDate"></div>
+                        </div>
                     </div>
                 `;
             }
@@ -112,7 +363,7 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
             const low52w = data.fiftyTwoWeekLow ? '$' + data.fiftyTwoWeekLow.toFixed(0) : 'N/A';
             const high52w = data.fiftyTwoWeekHigh ? '$' + data.fiftyTwoWeekHigh.toFixed(0) : 'N/A';
             
-            app.innerHTML = `
+            appEl.innerHTML = `
                 <div class="card">
                     <div class="header">
                         <div>
@@ -122,7 +373,11 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
                         <div style="text-align:right;">
                             <div class="price">$${data.price.toFixed(2)}</div>
                             <div class="change ${changeClass}">${changeSymbol} ${Math.abs(data.change).toFixed(2)}% ($${Math.abs(data.changeAmount).toFixed(2)})</div>
+                            <div class="period-label">${data.periodLabel || currentPeriod}</div>
                         </div>
+                    </div>
+                    <div class="controls">
+                        <div class="period-selector">${periodButtons}</div>
                     </div>
                     ${chartHtml}
                     <div class="stats">
@@ -141,14 +396,75 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
                     </div>
                 </div>
             `;
-            app.className = '';
+            appEl.className = '';
+            
+            // Setup chart hover
+            setupChartHover(data.history, color);
         }
         
-        // Auto-render if data is embedded
-        if (currentData && currentData.ticker) {
-            renderStock(currentData);
+        function setupChartHover(prices, color) {
+            const svg = document.getElementById('chartSvg');
+            const container = document.getElementById('chartContainer');
+            if (!svg || !container || !prices) return;
+            
+            const tooltip = document.getElementById('tooltip');
+            const hoverCircle = document.getElementById('hoverCircle');
+            
+            svg.addEventListener('mousemove', (e) => {
+                const rect = svg.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const relX = (x / rect.width) * 300;
+                
+                const minP = Math.min(...prices) * 0.99;
+                const maxP = Math.max(...prices) * 1.01;
+                const rangeP = maxP - minP || 1;
+                const step = 300 / (prices.length - 1);
+                const index = Math.min(Math.max(Math.round(relX / step), 0), prices.length - 1);
+                const price = prices[index];
+                
+                const px = index * step;
+                const py = 80 - ((price - minP) / rangeP * 70);
+                
+                hoverCircle.setAttribute('cx', px);
+                hoverCircle.setAttribute('cy', py);
+                hoverCircle.style.display = 'block';
+                
+                const daysAgo = prices.length - 1 - index;
+                const dateLabel = daysAgo === 0 ? 'Today' : daysAgo === 1 ? 'Yesterday' : `${daysAgo} days ago`;
+                
+                document.getElementById('tooltipPrice').textContent = '$' + price.toFixed(2);
+                document.getElementById('tooltipDate').textContent = dateLabel;
+                
+                const tooltipX = (px / 300) * rect.width;
+                tooltip.style.left = Math.min(tooltipX, rect.width - 100) + 'px';
+                tooltip.style.top = '-40px';
+                tooltip.classList.add('visible');
+            });
+            
+            svg.addEventListener('mouseleave', () => {
+                hoverCircle.style.display = 'none';
+                tooltip.classList.remove('visible');
+            });
         }
-    </script>
+        
+        // XSS prevention helper
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Expose to global for onclick handlers
+        window.changePeriod = changePeriod;
+        
+        // Initialize: start handshake, then render embedded data if available
+        initializeApp().then(() => {
+            // Auto-render if data is embedded (fallback for when postMessage flow doesn't work)
+            if (currentData && currentData.ticker) {
+                renderStock(currentData);
+            }
+        });
+    <\/script>
 </body>
 </html>'''
 
@@ -942,7 +1258,8 @@ async def list_tools():
             # MCP Apps metadata - link to UI resource
             _meta={
                 "ui": {
-                    "resourceUri": "ui://yfinance/stock-card"
+                    "resourceUri": "ui://yfinance/stock-card",
+                    "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://esm.sh; connect-src 'self' https://esm.sh"
                 }
             }
         ),
@@ -968,7 +1285,8 @@ async def list_tools():
             },
             _meta={
                 "ui": {
-                    "resourceUri": "ui://yfinance/comparison"
+                    "resourceUri": "ui://yfinance/comparison",
+                    "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'; script-src 'self' 'unsafe-inline' 'unsafe-eval'"
                 }
             }
         )
@@ -1063,15 +1381,28 @@ async def call_tool(name: str, arguments: dict):
             for ticker in tickers[:5]:
                 stock = yf.Ticker(ticker)
                 info = stock.info
-                
+
                 hist = stock.history(period=period)
                 hist_close = hist["Close"].tolist() if not hist.empty else []
-                
+
+                price = info.get("currentPrice") or info.get("regularMarketPrice")
+
+                # Calculate period change (from first price in history to current)
+                if hist_close and len(hist_close) >= 2:
+                    period_start_price = hist_close[0]
+                    period_change_amount = price - period_start_price
+                    period_change_pct = (period_change_amount / period_start_price * 100) if period_start_price else 0
+                else:
+                    # Fallback to daily change
+                    prev_close = info.get("previousClose", 0)
+                    period_change_amount = (price - prev_close) if price and prev_close else 0
+                    period_change_pct = (period_change_amount / prev_close * 100) if prev_close else 0
+
                 stocks_data.append({
                     "ticker": ticker,
                     "name": info.get("longName", ticker),
-                    "price": info.get("currentPrice") or info.get("regularMarketPrice"),
-                    "change": info.get("regularMarketChangePercent", 0),
+                    "price": price,
+                    "change": period_change_pct,
                     "marketCap": info.get("marketCap", 0),
                     "marketCapFormatted": format_number(info.get("marketCap", 0)),
                     "pe": info.get("trailingPE"),
