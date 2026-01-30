@@ -999,17 +999,25 @@ async def call_tool(name: str, arguments: dict):
             hist_close = hist["Close"].tolist() if not hist.empty else []
             
             price = info.get("currentPrice") or info.get("regularMarketPrice")
-            prev_close = info.get("previousClose", 0)
-            change_amount = (price - prev_close) if price and prev_close else 0
-            change_pct = (change_amount / prev_close * 100) if prev_close else 0
+            
+            # Calculate period change (from first price in history to current)
+            if hist_close and len(hist_close) >= 2:
+                period_start_price = hist_close[0]
+                period_change_amount = price - period_start_price
+                period_change_pct = (period_change_amount / period_start_price * 100) if period_start_price else 0
+            else:
+                # Fallback to daily change
+                prev_close = info.get("previousClose", 0)
+                period_change_amount = (price - prev_close) if price and prev_close else 0
+                period_change_pct = (period_change_amount / prev_close * 100) if prev_close else 0
             
             # Return structured data that the UI will render
             structured_data = {
                 "ticker": ticker,
                 "name": info.get("longName", ticker),
                 "price": price,
-                "change": change_pct,
-                "changeAmount": change_amount,
+                "change": period_change_pct,
+                "changeAmount": period_change_amount,
                 "open": info.get("open"),
                 "dayHigh": info.get("dayHigh"),
                 "dayLow": info.get("dayLow"),
@@ -1030,7 +1038,7 @@ async def call_tool(name: str, arguments: dict):
             # Return structuredContent - VS Code MCP Apps will fetch the UI from the tool's _meta.ui.resourceUri
             # and post this data to it via postMessage
             return CallToolResult(
-                content=[TextContent(type="text", text=f"{info.get('longName', ticker)} ({ticker}): ${price:.2f} ({change_pct:+.2f}%)")],
+                content=[TextContent(type="text", text=f"{info.get('longName', ticker)} ({ticker}): ${price:.2f} ({period_change_pct:+.2f}% over {period_labels.get(period, period)})")],
                 structuredContent=structured_data
             )
             
