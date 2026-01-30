@@ -256,7 +256,8 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
             params: {
                 protocolVersion: "2026-01-26",
                 appCapabilities: {
-                    invokeTools: true
+                    invokeTools: true,
+                    setPrompt: true
                 }
             }
         }, '*');
@@ -268,13 +269,11 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
             document.querySelectorAll('.period-btn').forEach(btn => {
                 btn.classList.toggle('active', btn.dataset.period === period);
             });
-            const refreshBtn = document.querySelector('.refresh-btn');
-            if (refreshBtn) {
-                refreshBtn.classList.add('loading');
-                refreshBtn.textContent = '⟳ Loading...';
-            }
             
-            // Request new data via tool invocation
+            // Show prompt message
+            showPromptMessage(`Get ${getPeriodLabel(period)} ${currentTicker} stock`);
+            
+            // Try to invoke tool (may not be supported)
             window.parent.postMessage({
                 jsonrpc: "2.0",
                 id: requestId++,
@@ -287,15 +286,45 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
                     }
                 }
             }, '*');
+            
+            // Also try setPrompt as fallback
+            window.parent.postMessage({
+                jsonrpc: "2.0",
+                id: requestId++,
+                method: "ui/requests/set-prompt",
+                params: {
+                    prompt: `get ${getPeriodLabel(period)} ${currentTicker} stock`
+                }
+            }, '*');
+        }
+        
+        function getPeriodLabel(period) {
+            const labels = { '1d': '1 day', '5d': '5 day', '1mo': '1 month', '3mo': '3 month', '6mo': '6 month', '1y': '1 year', 'ytd': 'YTD' };
+            return labels[period] || period;
+        }
+        
+        function showPromptMessage(prompt) {
+            const existing = document.querySelector('.prompt-hint');
+            if (existing) existing.remove();
+            
+            const hint = document.createElement('div');
+            hint.className = 'prompt-hint';
+            hint.innerHTML = `<span>💡 Ask: "${prompt}"</span><button onclick="copyPrompt('${prompt}')">📋 Copy</button>`;
+            hint.style.cssText = 'position:fixed;bottom:16px;left:16px;right:16px;background:rgba(59,130,246,0.9);color:white;padding:12px 16px;border-radius:8px;display:flex;justify-content:space-between;align-items:center;font-size:13px;z-index:100;';
+            document.body.appendChild(hint);
+            
+            setTimeout(() => hint.remove(), 5000);
+        }
+        
+        function copyPrompt(prompt) {
+            navigator.clipboard.writeText(prompt);
+            const hint = document.querySelector('.prompt-hint span');
+            if (hint) hint.textContent = '✓ Copied! Paste in chat.';
         }
         
         function refresh() {
             if (!currentTicker) return;
-            const refreshBtn = document.querySelector('.refresh-btn');
-            if (refreshBtn) {
-                refreshBtn.classList.add('loading');
-                refreshBtn.textContent = '⟳ Loading...';
-            }
+            showPromptMessage(`Get ${getPeriodLabel(currentPeriod)} ${currentTicker} stock`);
             
             window.parent.postMessage({
                 jsonrpc: "2.0",
@@ -670,13 +699,46 @@ COMPARISON_HTML = '''<!DOCTYPE html>
             method: "ui/initialize",
             params: { 
                 protocolVersion: "2026-01-26", 
-                appCapabilities: { invokeTools: true } 
+                appCapabilities: { invokeTools: true, setPrompt: true } 
             }
         }, '*');
         
+        function getPeriodLabel(period) {
+            const labels = { '1d': '1 day', '5d': '5 day', '1mo': '1 month', '3mo': '3 month', '6mo': '6 month', '1y': '1 year' };
+            return labels[period] || period;
+        }
+        
+        function showPromptMessage(prompt) {
+            const existing = document.querySelector('.prompt-hint');
+            if (existing) existing.remove();
+            
+            const hint = document.createElement('div');
+            hint.className = 'prompt-hint';
+            hint.innerHTML = `<span>💡 Ask: "${prompt}"</span><button onclick="copyPrompt('${prompt.replace(/'/g, "\\'")}')">📋 Copy</button>`;
+            hint.style.cssText = 'position:fixed;bottom:16px;left:16px;right:16px;background:rgba(59,130,246,0.9);color:white;padding:12px 16px;border-radius:8px;display:flex;justify-content:space-between;align-items:center;font-size:13px;z-index:100;';
+            document.body.appendChild(hint);
+            
+            setTimeout(() => hint.remove(), 5000);
+        }
+        
+        function copyPrompt(prompt) {
+            navigator.clipboard.writeText(prompt);
+            const hint = document.querySelector('.prompt-hint span');
+            if (hint) hint.textContent = '✓ Copied! Paste in chat.';
+        }
+        
         function requestPeriod(period) {
             if (period === currentPeriod || currentTickers.length === 0) return;
-            showLoading();
+            
+            // Update button state
+            document.querySelectorAll('.period-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.textContent === getPeriodLabel(period).replace(' ', '').toUpperCase().slice(0,2) || btn.dataset?.period === period);
+            });
+            
+            const prompt = `compare ${currentTickers.join(', ')} stocks for ${getPeriodLabel(period)}`;
+            showPromptMessage(prompt);
+            
+            // Try invoke-tool
             window.parent.postMessage({
                 jsonrpc: "2.0",
                 id: requestId++,
@@ -697,7 +759,10 @@ COMPARISON_HTML = '''<!DOCTYPE html>
             }
             const newTickers = [...currentTickers, ticker];
             input.value = '';
-            showLoading();
+            
+            const prompt = `compare ${newTickers.join(', ')} stocks`;
+            showPromptMessage(prompt);
+            
             window.parent.postMessage({
                 jsonrpc: "2.0",
                 id: requestId++,
@@ -711,8 +776,14 @@ COMPARISON_HTML = '''<!DOCTYPE html>
         
         function removeStock(ticker) {
             const newTickers = currentTickers.filter(t => t !== ticker);
-            if (newTickers.length === 0) return;
-            showLoading();
+            if (newTickers.length === 0) {
+                showPromptMessage('Need at least one stock to compare');
+                return;
+            }
+            
+            const prompt = `compare ${newTickers.join(', ')} stocks`;
+            showPromptMessage(prompt);
+            
             window.parent.postMessage({
                 jsonrpc: "2.0",
                 id: requestId++,
@@ -725,6 +796,9 @@ COMPARISON_HTML = '''<!DOCTYPE html>
         }
         
         function viewStock(ticker) {
+            const prompt = `get ${getPeriodLabel(currentPeriod)} ${ticker} stock`;
+            showPromptMessage(prompt);
+            
             window.parent.postMessage({
                 jsonrpc: "2.0",
                 id: requestId++,
