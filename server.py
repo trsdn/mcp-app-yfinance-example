@@ -287,11 +287,47 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
                 }
             }, '*');
             
-            // Also try setPrompt as fallback
+            // Try multiple methods to invoke the tool
+            
+            // Method 1: invoke-tool (MCP Apps spec)
+            window.parent.postMessage({
+                jsonrpc: "2.0",
+                id: requestId++,
+                method: "ui/requests/invoke-tool",
+                params: {
+                    name: "get_stock_quote",
+                    arguments: {
+                        ticker: currentTicker,
+                        period: period
+                    }
+                }
+            }, '*');
+            
+            // Method 2: send-message to chat
+            window.parent.postMessage({
+                jsonrpc: "2.0",
+                id: requestId++,
+                method: "ui/requests/send-message",
+                params: {
+                    message: `get ${getPeriodLabel(period)} ${currentTicker} stock`
+                }
+            }, '*');
+            
+            // Method 3: set-prompt (populate chat input)
             window.parent.postMessage({
                 jsonrpc: "2.0",
                 id: requestId++,
                 method: "ui/requests/set-prompt",
+                params: {
+                    prompt: `get ${getPeriodLabel(period)} ${currentTicker} stock`
+                }
+            }, '*');
+            
+            // Method 4: submit-prompt (send and execute)
+            window.parent.postMessage({
+                jsonrpc: "2.0",
+                id: requestId++,
+                method: "ui/requests/submit-prompt",
                 params: {
                     prompt: `get ${getPeriodLabel(period)} ${currentTicker} stock`
                 }
@@ -309,11 +345,11 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
             
             const hint = document.createElement('div');
             hint.className = 'prompt-hint';
-            hint.innerHTML = `<span>💡 Ask: "${prompt}"</span><button onclick="copyPrompt('${prompt}')">📋 Copy</button>`;
+            hint.innerHTML = `<span>💡 Ask: "${prompt}"</span><button onclick="copyPrompt('${prompt}')">📋 Copy</button><button onclick="sendPrompt('${prompt}')" style="margin-left:8px;background:#22c55e;">▶ Send</button>`;
             hint.style.cssText = 'position:fixed;bottom:16px;left:16px;right:16px;background:rgba(59,130,246,0.9);color:white;padding:12px 16px;border-radius:8px;display:flex;justify-content:space-between;align-items:center;font-size:13px;z-index:100;';
             document.body.appendChild(hint);
             
-            setTimeout(() => hint.remove(), 5000);
+            setTimeout(() => hint.remove(), 8000);
         }
         
         function copyPrompt(prompt) {
@@ -322,22 +358,43 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
             if (hint) hint.textContent = '✓ Copied! Paste in chat.';
         }
         
-        function refresh() {
-            if (!currentTicker) return;
-            showPromptMessage(`Get ${getPeriodLabel(currentPeriod)} ${currentTicker} stock`);
+        function sendPrompt(prompt) {
+            // Try all possible methods to send the prompt
+            window.parent.postMessage({
+                jsonrpc: "2.0",
+                id: requestId++,
+                method: "ui/requests/send-message",
+                params: { message: prompt }
+            }, '*');
             
             window.parent.postMessage({
                 jsonrpc: "2.0",
                 id: requestId++,
-                method: "ui/requests/invoke-tool",
-                params: {
-                    name: "get_stock_quote",
-                    arguments: {
-                        ticker: currentTicker,
-                        period: currentPeriod
-                    }
+                method: "ui/requests/submit-prompt",
+                params: { prompt: prompt }
+            }, '*');
+            
+            // Also try VS Code specific command
+            window.parent.postMessage({
+                jsonrpc: "2.0",
+                id: requestId++,
+                method: "ui/requests/execute-command",
+                params: { 
+                    command: "workbench.action.chat.send",
+                    args: [prompt]
                 }
             }, '*');
+            
+            const hint = document.querySelector('.prompt-hint span');
+            if (hint) hint.textContent = '⏳ Sending...';
+        }
+        
+        function refresh() {
+            if (!currentTicker) return;
+            const prompt = `get ${getPeriodLabel(currentPeriod)} ${currentTicker} stock`;
+            showPromptMessage(prompt);
+            sendPrompt(prompt);
+        }
         }
         
         function renderStock(data) {
@@ -714,17 +771,38 @@ COMPARISON_HTML = '''<!DOCTYPE html>
             
             const hint = document.createElement('div');
             hint.className = 'prompt-hint';
-            hint.innerHTML = `<span>💡 Ask: "${prompt}"</span><button onclick="copyPrompt('${prompt.replace(/'/g, "\\'")}')">📋 Copy</button>`;
+            const safePrompt = prompt.replace(/'/g, "\\'");
+            hint.innerHTML = `<span>💡 Ask: "${prompt}"</span><button onclick="copyPrompt('${safePrompt}')">📋 Copy</button><button onclick="sendPrompt('${safePrompt}')" style="margin-left:8px;background:#22c55e;">▶ Send</button>`;
             hint.style.cssText = 'position:fixed;bottom:16px;left:16px;right:16px;background:rgba(59,130,246,0.9);color:white;padding:12px 16px;border-radius:8px;display:flex;justify-content:space-between;align-items:center;font-size:13px;z-index:100;';
             document.body.appendChild(hint);
             
-            setTimeout(() => hint.remove(), 5000);
+            setTimeout(() => hint.remove(), 8000);
         }
         
         function copyPrompt(prompt) {
             navigator.clipboard.writeText(prompt);
             const hint = document.querySelector('.prompt-hint span');
             if (hint) hint.textContent = '✓ Copied! Paste in chat.';
+        }
+        
+        function sendPrompt(prompt) {
+            // Try all possible methods to send the prompt
+            window.parent.postMessage({
+                jsonrpc: "2.0",
+                id: requestId++,
+                method: "ui/requests/send-message",
+                params: { message: prompt }
+            }, '*');
+            
+            window.parent.postMessage({
+                jsonrpc: "2.0",
+                id: requestId++,
+                method: "ui/requests/submit-prompt",
+                params: { prompt: prompt }
+            }, '*');
+            
+            const hint = document.querySelector('.prompt-hint span');
+            if (hint) hint.textContent = '⏳ Sending...';
         }
         
         function requestPeriod(period) {
@@ -737,8 +815,9 @@ COMPARISON_HTML = '''<!DOCTYPE html>
             
             const prompt = `compare ${currentTickers.join(', ')} stocks for ${getPeriodLabel(period)}`;
             showPromptMessage(prompt);
+            sendPrompt(prompt);
             
-            // Try invoke-tool
+            // Also try invoke-tool
             window.parent.postMessage({
                 jsonrpc: "2.0",
                 id: requestId++,
@@ -762,16 +841,7 @@ COMPARISON_HTML = '''<!DOCTYPE html>
             
             const prompt = `compare ${newTickers.join(', ')} stocks`;
             showPromptMessage(prompt);
-            
-            window.parent.postMessage({
-                jsonrpc: "2.0",
-                id: requestId++,
-                method: "ui/requests/invoke-tool",
-                params: {
-                    name: "compare_stocks",
-                    arguments: { tickers: newTickers, period: currentPeriod }
-                }
-            }, '*');
+            sendPrompt(prompt);
         }
         
         function removeStock(ticker) {
@@ -783,31 +853,13 @@ COMPARISON_HTML = '''<!DOCTYPE html>
             
             const prompt = `compare ${newTickers.join(', ')} stocks`;
             showPromptMessage(prompt);
-            
-            window.parent.postMessage({
-                jsonrpc: "2.0",
-                id: requestId++,
-                method: "ui/requests/invoke-tool",
-                params: {
-                    name: "compare_stocks",
-                    arguments: { tickers: newTickers, period: currentPeriod }
-                }
-            }, '*');
+            sendPrompt(prompt);
         }
         
         function viewStock(ticker) {
             const prompt = `get ${getPeriodLabel(currentPeriod)} ${ticker} stock`;
             showPromptMessage(prompt);
-            
-            window.parent.postMessage({
-                jsonrpc: "2.0",
-                id: requestId++,
-                method: "ui/requests/invoke-tool",
-                params: {
-                    name: "get_stock_quote",
-                    arguments: { ticker: ticker, period: currentPeriod }
-                }
-            }, '*');
+            sendPrompt(prompt);
         }
         
         function showLoading() {
