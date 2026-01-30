@@ -2,7 +2,7 @@
 
 ## Overview
 
-This MCP server provides stock market data via the yfinance API with interactive HTML UIs rendered in VS Code chat using [MCP Apps (SEP-1865)](https://github.com/modelcontextprotocol/ext-apps).
+This MCP server provides stock market data via the yfinance API with interactive HTML UIs rendered in VS Code chat using [MCP Apps](https://github.com/modelcontextprotocol/specification/blob/main/docs/draft/apps.md).
 
 ---
 
@@ -56,11 +56,10 @@ sequenceDiagram
     Server->>YF: Ticker("AAPL").history(period="6mo")
     YF-->>Server: Price history
     Server->>Server: Calculate period change
-    Server->>Server: Cache in _last_stock_data
     Server-->>MCP: CallToolResult + structuredContent
     MCP->>Server: resources/read ui://yfinance/stock-card
-    Server->>Server: Embed data into HTML
-    Server-->>MCP: HTML with data
+    Server-->>MCP: HTML template
+    MCP->>IFrame: postMessage tool-result
     MCP->>VSCode: Render in iFrame
     VSCode-->>User: Interactive stock card
 ```
@@ -100,7 +99,7 @@ sequenceDiagram
 - **MIME:** `text/html;profile=mcp-app`
 - **Content:** Self-contained HTML with embedded JS
 - **Handshake:** `ui/initialize` → `ui/notifications/initialized`
-- **Data:** Embedded via `let currentData = {...}` or via `ui/notifications/tool-result`
+- **Data:** Received via `ui/notifications/tool-result` postMessage
 
 ## Quick Commands
 
@@ -147,5 +146,5 @@ uv run python server.py
 |-------|--------|------------|
 | SSE timeout after idle | Server shows "stopped" | Restart via MCP: List Servers |
 | Port 3002 conflict | Server won't start | Kill existing process |
-| yfinance rate limits | Slow responses | Use preloaded `allPeriods` |
+| yfinance rate limits | Slow responses | Cache results client-side |
 | MCP Apps VS Code only | No other clients | Use stdio for non-UI clients |

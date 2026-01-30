@@ -1,23 +1,26 @@
-````markdown
-# Quick Start Guide
+# Quick Start
 
-## Using This Repository
+## Prerequisites
 
-This MCP Apps Stock Server provides stock market data with interactive UI.
+- Python 3.10+
+- [uv](https://docs.astral.sh/uv/) package manager
+- VS Code Insiders with `chat.mcp.apps.enabled: true`
 
-### Start the Server
+## Setup
 
 ```bash
-# Activate virtual environment
-.venv\Scripts\Activate.ps1
+# Install dependencies
+uv sync
 
-# Start the server
+# Start the MCP server
 uv run python server.py
 ```
 
-### VS Code Configuration
+Server starts on `http://localhost:3002/sse`
 
-The server is configured in `.vscode/mcp.json`:
+## VS Code Configuration
+
+Already configured in `.vscode/mcp.json`:
 
 ```json
 {
@@ -30,93 +33,26 @@ The server is configured in `.vscode/mcp.json`:
 }
 ```
 
-### Enable MCP Apps in VS Code
+## Try It
 
-```json
-{
-  "chat.mcp.apps.enabled": true
-}
-```
+In VS Code Chat, ask:
 
-## Available AI Customizations
+- "Get AAPL stock quote"
+- "Show me Tesla 6 month chart"
+- "What's Microsoft stock price?"
 
-### Skills (`.claude/skills/`)
+## Troubleshooting
 
-| Skill | Purpose |
-|-------|---------|
-| `skill-builder` | Create new skills for Claude/Copilot |
-| `git-create-pr` | Create PRs with proper formatting |
-| `git-workflow` | Git commit/branch conventions |
-| `code-review` | Structured code review process |
-| `doc-readme` | README best practices |
-| `doc-adr` | Architecture Decision Records |
-| `structure-conventions` | Project structure guidance |
-| `blueprint-sync` | Sync from blueprint repos |
+| Issue | Solution |
+|-------|----------|
+| Server shows stopped | Restart via `MCP: List Servers` |
+| Port 3002 in use | `netstat -ano \| Select-String ":3002"` then kill process |
+| UI shows Loading | Check `chat.mcp.apps.enabled` setting |
 
-### Copilot Skills (`.github/skills/`)
+## Files
 
-| Skill | Purpose |
-|-------|---------|
-| `mcp-apps` | Build MCP Apps with interactive UI |
-| `copilot-skill-builder` | Create Copilot skills |
-| `copilot-setup-audit` | Audit Copilot configuration |
-
-### Agents
-
-| Agent | Location | Purpose |
-|-------|----------|---------|
-| `claude-customization-builder` | `.claude/agents/` | Create Claude customizations |
-| `copilot-customization-builder` | `.github/agents/` | Create Copilot customizations |
-
-### Prompts (`.github/prompts/`)
-
-- `/copilot-audit-setup` - Audit Copilot configuration
-- `/copilot-new-agent` - Create a new agent
-- `/copilot-new-skill` - Create a new skill
-- `/copilot-new-prompt` - Create a new prompt
-
-## Common Tasks
-
-### Create a New Skill
-
-Ask: "Create a skill for [purpose]"
-
-Or use the skill-builder skill directly.
-
-### Sync Blueprint Updates
-
-Ask: "sync blueprints" to get latest skills from upstream templates.
-
-### Code Review
-
-Ask: "review this code" to get a structured review.
-
-### Create a PR
-
-Ask: "create a PR" to generate a properly formatted pull request.
-
-## MCP Configuration
-
-Edit `.mcp.json` for MCP server integrations:
-
-```json
-{
-  "mcpServers": {
-    "github": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
-      }
-    }
-  }
-}
-```
-
-## Resources
-
-- [MCP Apps SKILL](.github/skills/mcp-apps/SKILL.md) - MCP Apps development
-- [Agent Skills Specification](https://agentskills.io/specification)
-- [AGENTS.md](AGENTS.md) - Project architecture
-
-````
+| File | Purpose |
+|------|---------|
+| [server.py](server.py) | MCP server with SSE transport |
+| [AGENTS.md](AGENTS.md) | Architecture documentation |
+| [README.md](README.md) | Project overview |
