@@ -82,13 +82,88 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
         }
         .change.positive { color: var(--color-text-success, #22c55e); }
         .change.negative { color: var(--color-text-danger, #ef4444); }
+        
+        /* Period selector */
+        .controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        .period-selector {
+            display: flex;
+            gap: 4px;
+        }
+        .period-btn {
+            padding: 6px 10px;
+            font-size: 11px;
+            font-weight: 500;
+            border: none;
+            border-radius: 6px;
+            background: var(--color-background-tertiary, rgba(15, 23, 42, 0.5));
+            color: var(--color-text-secondary, #94a3b8);
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        .period-btn:hover {
+            background: rgba(51, 65, 85, 0.8);
+            color: #f1f5f9;
+        }
+        .period-btn.active {
+            background: var(--color-accent, #3b82f6);
+            color: white;
+        }
+        .refresh-btn {
+            padding: 6px 12px;
+            font-size: 12px;
+            border: none;
+            border-radius: 6px;
+            background: var(--color-background-tertiary, rgba(15, 23, 42, 0.5));
+            color: var(--color-text-secondary, #94a3b8);
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        .refresh-btn:hover {
+            background: rgba(51, 65, 85, 0.8);
+            color: #f1f5f9;
+        }
+        .refresh-btn.loading {
+            opacity: 0.6;
+            cursor: wait;
+        }
+        
+        /* Chart with tooltip */
         .chart {
-            margin: 20px 0;
-            height: 100px;
+            margin: 12px 0;
+            height: 120px;
             background: var(--color-background-tertiary, rgba(15, 23, 42, 0.3));
             border-radius: var(--border-radius-md, 8px);
             padding: 8px;
+            position: relative;
         }
+        .chart-container {
+            position: relative;
+            height: 100px;
+        }
+        .chart-container svg {
+            cursor: crosshair;
+        }
+        .tooltip {
+            position: absolute;
+            background: rgba(15, 23, 42, 0.95);
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 12px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.15s ease;
+            z-index: 10;
+            white-space: nowrap;
+        }
+        .tooltip.visible { opacity: 1; }
+        .tooltip-price { font-weight: 600; font-size: 14px; }
+        .tooltip-date { color: #64748b; margin-top: 2px; }
         .chart-label {
             display: flex;
             justify-content: space-between;
@@ -96,6 +171,7 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
             color: var(--color-text-tertiary, #64748b);
             margin-top: 4px;
         }
+        
         .stats {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
@@ -107,6 +183,12 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
             padding: 8px;
             background: var(--color-background-tertiary, rgba(15, 23, 42, 0.5));
             border-radius: var(--border-radius-md, 8px);
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        .stat:hover {
+            background: rgba(51, 65, 85, 0.6);
+            transform: translateY(-1px);
         }
         .stat-label {
             font-size: 11px;
@@ -125,44 +207,118 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
             height: 200px;
             color: var(--color-text-secondary, #94a3b8);
         }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid rgba(148, 163, 184, 0.3);
+            border-top-color: #3b82f6;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-right: 8px;
+        }
     </style>
 </head>
 <body>
-    <div id="app" class="loading">Loading stock data...</div>
+    <div id="app" class="loading"><div class="spinner"></div> Loading stock data...</div>
     
     <script>
-        // Listen for tool input from host
+        let currentData = null;
+        let currentTicker = null;
+        let currentPeriod = '1mo';
+        let requestId = 1;
+        
+        // Listen for messages from host
         window.addEventListener('message', function(event) {
             const data = event.data;
             
             // Handle tool result notification
             if (data.method === 'ui/notifications/tool-result' && data.params?.structuredContent) {
-                renderStock(data.params.structuredContent);
+                currentData = data.params.structuredContent;
+                currentTicker = currentData.ticker;
+                currentPeriod = currentData.period || '1mo';
+                renderStock(currentData);
             }
-            // Handle tool input notification (arguments)
-            if (data.method === 'ui/notifications/tool-input') {
-                // Tool arguments available - could use for loading state
+            // Handle tool input notification
+            if (data.method === 'ui/notifications/tool-input' && data.params?.arguments) {
+                currentTicker = data.params.arguments.ticker;
+                currentPeriod = data.params.arguments.period || '1mo';
             }
         });
         
         // Send initialize request
         window.parent.postMessage({
             jsonrpc: "2.0",
-            id: 1,
+            id: requestId++,
             method: "ui/initialize",
             params: {
                 protocolVersion: "2026-01-26",
-                appCapabilities: {}
+                appCapabilities: {
+                    invokeTools: true
+                }
             }
         }, '*');
+        
+        function requestPeriod(period) {
+            if (!currentTicker || period === currentPeriod) return;
+            
+            // Update UI immediately
+            document.querySelectorAll('.period-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.period === period);
+            });
+            const refreshBtn = document.querySelector('.refresh-btn');
+            if (refreshBtn) {
+                refreshBtn.classList.add('loading');
+                refreshBtn.textContent = '⟳ Loading...';
+            }
+            
+            // Request new data via tool invocation
+            window.parent.postMessage({
+                jsonrpc: "2.0",
+                id: requestId++,
+                method: "ui/requests/invoke-tool",
+                params: {
+                    name: "get_stock_quote",
+                    arguments: {
+                        ticker: currentTicker,
+                        period: period
+                    }
+                }
+            }, '*');
+        }
+        
+        function refresh() {
+            if (!currentTicker) return;
+            const refreshBtn = document.querySelector('.refresh-btn');
+            if (refreshBtn) {
+                refreshBtn.classList.add('loading');
+                refreshBtn.textContent = '⟳ Loading...';
+            }
+            
+            window.parent.postMessage({
+                jsonrpc: "2.0",
+                id: requestId++,
+                method: "ui/requests/invoke-tool",
+                params: {
+                    name: "get_stock_quote",
+                    arguments: {
+                        ticker: currentTicker,
+                        period: currentPeriod
+                    }
+                }
+            }, '*');
+        }
         
         function renderStock(data) {
             const app = document.getElementById('app');
             const changeClass = data.change >= 0 ? 'positive' : 'negative';
             const changeSymbol = data.change >= 0 ? '▲' : '▼';
+            const color = data.change >= 0 ? '#22c55e' : '#ef4444';
             
-            // Build chart SVG
-            let chartSvg = '';
+            // Build interactive chart SVG
+            let chartHtml = '';
             if (data.history && data.history.length >= 2) {
                 const prices = data.history;
                 const minP = Math.min(...prices) * 0.99;
@@ -172,26 +328,55 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
                 
                 const points = prices.map((p, i) => {
                     const x = i * step;
-                    const y = 80 - ((p - minP) / rangeP * 70);
+                    const y = 90 - ((p - minP) / rangeP * 80);
                     return `${x.toFixed(1)},${y.toFixed(1)}`;
                 }).join(' ');
                 
-                const areaPoints = points + ' 300,85 0,85';
-                const color = data.change >= 0 ? '#22c55e' : '#ef4444';
+                // Create circles for each data point (for hover)
+                let circles = prices.map((p, i) => {
+                    const x = i * step;
+                    const y = 90 - ((p - minP) / rangeP * 80);
+                    return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" fill="transparent" data-price="${p.toFixed(2)}" data-index="${i}"/>`;
+                }).join('');
                 
-                chartSvg = `
-                    <svg width="100%" height="85" viewBox="0 0 300 85" preserveAspectRatio="none">
-                        <defs>
-                            <linearGradient id="chartGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-                                <stop offset="0%" style="stop-color:${color};stop-opacity:0.3"/>
-                                <stop offset="100%" style="stop-color:${color};stop-opacity:0.05"/>
-                            </linearGradient>
-                        </defs>
-                        <polygon fill="url(#chartGradient)" points="${areaPoints}"/>
-                        <polyline fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="${points}"/>
-                    </svg>
+                const areaPoints = points + ' 300,95 0,95';
+                
+                chartHtml = `
+                    <div class="chart-container" id="chartContainer">
+                        <svg width="100%" height="100" viewBox="0 0 300 100" preserveAspectRatio="none" id="chartSvg">
+                            <defs>
+                                <linearGradient id="chartGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                                    <stop offset="0%" style="stop-color:${color};stop-opacity:0.3"/>
+                                    <stop offset="100%" style="stop-color:${color};stop-opacity:0.05"/>
+                                </linearGradient>
+                            </defs>
+                            <polygon fill="url(#chartGradient)" points="${areaPoints}"/>
+                            <polyline id="chartLine" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="${points}"/>
+                            <circle id="hoverCircle" cx="0" cy="0" r="5" fill="${color}" stroke="white" stroke-width="2" style="display:none"/>
+                            ${circles}
+                        </svg>
+                        <div class="tooltip" id="tooltip">
+                            <div class="tooltip-price" id="tooltipPrice"></div>
+                            <div class="tooltip-date" id="tooltipDate"></div>
+                        </div>
+                    </div>
                 `;
             }
+            
+            // Period buttons
+            const periods = [
+                { key: '1d', label: '1D' },
+                { key: '5d', label: '5D' },
+                { key: '1mo', label: '1M' },
+                { key: '3mo', label: '3M' },
+                { key: '6mo', label: '6M' },
+                { key: '1y', label: '1Y' },
+                { key: 'ytd', label: 'YTD' }
+            ];
+            
+            const periodBtns = periods.map(p => 
+                `<button class="period-btn ${data.period === p.key ? 'active' : ''}" data-period="${p.key}" onclick="requestPeriod('${p.key}')">${p.label}</button>`
+            ).join('');
             
             app.className = 'card';
             app.innerHTML = `
@@ -206,8 +391,13 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
                     </div>
                 </div>
                 
+                <div class="controls">
+                    <div class="period-selector">${periodBtns}</div>
+                    <button class="refresh-btn" onclick="refresh()">⟳ Refresh</button>
+                </div>
+                
                 <div class="chart">
-                    ${chartSvg}
+                    ${chartHtml}
                     <div class="chart-label">
                         <span>${data.periodLabel || '30 days'} ago</span>
                         <span>Today</span>
@@ -241,6 +431,57 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
                     </div>
                 </div>
             `;
+            
+            // Setup chart hover interaction
+            setupChartInteraction(data);
+        }
+        
+        function setupChartInteraction(data) {
+            const container = document.getElementById('chartContainer');
+            const svg = document.getElementById('chartSvg');
+            const tooltip = document.getElementById('tooltip');
+            const hoverCircle = document.getElementById('hoverCircle');
+            
+            if (!container || !svg || !data.history) return;
+            
+            const prices = data.history;
+            const minP = Math.min(...prices) * 0.99;
+            const maxP = Math.max(...prices) * 1.01;
+            const rangeP = maxP - minP || 1;
+            
+            svg.addEventListener('mousemove', function(e) {
+                const rect = svg.getBoundingClientRect();
+                const x = (e.clientX - rect.left) / rect.width * 300;
+                const step = 300 / (prices.length - 1);
+                const index = Math.round(x / step);
+                
+                if (index >= 0 && index < prices.length) {
+                    const price = prices[index];
+                    const px = index * step;
+                    const py = 90 - ((price - minP) / rangeP * 80);
+                    
+                    hoverCircle.setAttribute('cx', px);
+                    hoverCircle.setAttribute('cy', py);
+                    hoverCircle.style.display = 'block';
+                    
+                    const daysAgo = prices.length - 1 - index;
+                    const dateLabel = daysAgo === 0 ? 'Today' : daysAgo === 1 ? 'Yesterday' : `${daysAgo} days ago`;
+                    
+                    document.getElementById('tooltipPrice').textContent = '$' + price.toFixed(2);
+                    document.getElementById('tooltipDate').textContent = dateLabel;
+                    
+                    // Position tooltip
+                    const tooltipX = (px / 300) * rect.width;
+                    tooltip.style.left = Math.min(tooltipX, rect.width - 100) + 'px';
+                    tooltip.style.top = '-40px';
+                    tooltip.classList.add('visible');
+                }
+            });
+            
+            svg.addEventListener('mouseleave', function() {
+                hoverCircle.style.display = 'none';
+                tooltip.classList.remove('visible');
+            });
         }
     </script>
 </body>
@@ -259,9 +500,67 @@ COMPARISON_HTML = '''<!DOCTYPE html>
             color: var(--color-text-primary, #f1f5f9);
             padding: 16px;
         }
-        h2 {
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
             margin-bottom: 16px;
+        }
+        h2 {
             font-size: 18px;
+        }
+        .controls {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .period-selector {
+            display: flex;
+            gap: 4px;
+        }
+        .period-btn {
+            padding: 6px 10px;
+            font-size: 11px;
+            font-weight: 500;
+            border: none;
+            border-radius: 6px;
+            background: var(--color-background-tertiary, rgba(15, 23, 42, 0.5));
+            color: var(--color-text-secondary, #94a3b8);
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        .period-btn:hover {
+            background: rgba(51, 65, 85, 0.8);
+            color: #f1f5f9;
+        }
+        .period-btn.active {
+            background: var(--color-accent, #3b82f6);
+            color: white;
+        }
+        .add-input {
+            padding: 6px 10px;
+            font-size: 12px;
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            border-radius: 6px;
+            background: var(--color-background-tertiary, rgba(15, 23, 42, 0.5));
+            color: #f1f5f9;
+            width: 80px;
+        }
+        .add-input::placeholder {
+            color: #64748b;
+        }
+        .add-btn {
+            padding: 6px 12px;
+            font-size: 12px;
+            border: none;
+            border-radius: 6px;
+            background: var(--color-accent, #3b82f6);
+            color: white;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        .add-btn:hover {
+            background: #2563eb;
         }
         table {
             width: 100%;
@@ -280,9 +579,28 @@ COMPARISON_HTML = '''<!DOCTYPE html>
             font-size: 11px;
             text-transform: uppercase;
             color: var(--color-text-tertiary, #64748b);
+            cursor: pointer;
+            user-select: none;
         }
-        tr:hover {
+        th:hover {
+            color: #f1f5f9;
+        }
+        th .sort-icon {
+            opacity: 0.5;
+            margin-left: 4px;
+        }
+        th.sorted .sort-icon {
+            opacity: 1;
+        }
+        tr.data-row {
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        tr.data-row:hover {
             background: rgba(51, 65, 85, 0.5);
+        }
+        tr.data-row:active {
+            background: rgba(59, 130, 246, 0.2);
         }
         .positive { color: var(--color-text-success, #22c55e); }
         .negative { color: var(--color-text-danger, #ef4444); }
@@ -293,25 +611,145 @@ COMPARISON_HTML = '''<!DOCTYPE html>
             height: 200px;
             color: var(--color-text-secondary, #94a3b8);
         }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid rgba(148, 163, 184, 0.3);
+            border-top-color: #3b82f6;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-right: 8px;
+        }
+        .remove-btn {
+            opacity: 0;
+            padding: 2px 6px;
+            font-size: 10px;
+            border: none;
+            border-radius: 4px;
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+            cursor: pointer;
+            margin-left: 8px;
+        }
+        tr:hover .remove-btn {
+            opacity: 1;
+        }
     </style>
 </head>
 <body>
-    <div id="app" class="loading">Loading comparison...</div>
+    <div id="app" class="loading"><div class="spinner"></div> Loading comparison...</div>
     
     <script>
+        let currentTickers = [];
+        let currentPeriod = '1mo';
+        let currentData = null;
+        let sortColumn = null;
+        let sortAsc = true;
+        let requestId = 1;
+        
         window.addEventListener('message', function(event) {
             const data = event.data;
             if (data.method === 'ui/notifications/tool-result' && data.params?.structuredContent) {
-                renderComparison(data.params.structuredContent);
+                currentData = data.params.structuredContent;
+                currentTickers = currentData.stocks.map(s => s.ticker);
+                currentPeriod = currentData.period || '1mo';
+                renderComparison(currentData);
+            }
+            if (data.method === 'ui/notifications/tool-input' && data.params?.arguments) {
+                currentTickers = data.params.arguments.tickers || [];
+                currentPeriod = data.params.arguments.period || '1mo';
             }
         });
         
         window.parent.postMessage({
             jsonrpc: "2.0",
-            id: 1,
+            id: requestId++,
             method: "ui/initialize",
-            params: { protocolVersion: "2026-01-26", appCapabilities: {} }
+            params: { 
+                protocolVersion: "2026-01-26", 
+                appCapabilities: { invokeTools: true } 
+            }
         }, '*');
+        
+        function requestPeriod(period) {
+            if (period === currentPeriod || currentTickers.length === 0) return;
+            showLoading();
+            window.parent.postMessage({
+                jsonrpc: "2.0",
+                id: requestId++,
+                method: "ui/requests/invoke-tool",
+                params: {
+                    name: "compare_stocks",
+                    arguments: { tickers: currentTickers, period: period }
+                }
+            }, '*');
+        }
+        
+        function addStock() {
+            const input = document.getElementById('addStockInput');
+            const ticker = input.value.trim().toUpperCase();
+            if (!ticker || currentTickers.includes(ticker)) {
+                input.value = '';
+                return;
+            }
+            const newTickers = [...currentTickers, ticker];
+            input.value = '';
+            showLoading();
+            window.parent.postMessage({
+                jsonrpc: "2.0",
+                id: requestId++,
+                method: "ui/requests/invoke-tool",
+                params: {
+                    name: "compare_stocks",
+                    arguments: { tickers: newTickers, period: currentPeriod }
+                }
+            }, '*');
+        }
+        
+        function removeStock(ticker) {
+            const newTickers = currentTickers.filter(t => t !== ticker);
+            if (newTickers.length === 0) return;
+            showLoading();
+            window.parent.postMessage({
+                jsonrpc: "2.0",
+                id: requestId++,
+                method: "ui/requests/invoke-tool",
+                params: {
+                    name: "compare_stocks",
+                    arguments: { tickers: newTickers, period: currentPeriod }
+                }
+            }, '*');
+        }
+        
+        function viewStock(ticker) {
+            window.parent.postMessage({
+                jsonrpc: "2.0",
+                id: requestId++,
+                method: "ui/requests/invoke-tool",
+                params: {
+                    name: "get_stock_quote",
+                    arguments: { ticker: ticker, period: currentPeriod }
+                }
+            }, '*');
+        }
+        
+        function showLoading() {
+            document.getElementById('app').innerHTML = '<div class="spinner"></div> Updating...';
+            document.getElementById('app').className = 'loading';
+        }
+        
+        function sortBy(column) {
+            if (sortColumn === column) {
+                sortAsc = !sortAsc;
+            } else {
+                sortColumn = column;
+                sortAsc = column === 'ticker' || column === 'name';
+            }
+            renderComparison(currentData);
+        }
         
         function makeSparkline(history, color) {
             if (!history || history.length < 2) return '—';
@@ -326,12 +764,30 @@ COMPARISON_HTML = '''<!DOCTYPE html>
         
         function renderComparison(data) {
             const app = document.getElementById('app');
-            const rows = data.stocks.map(s => {
+            
+            // Sort stocks if needed
+            let stocks = [...data.stocks];
+            if (sortColumn) {
+                stocks.sort((a, b) => {
+                    let valA = a[sortColumn], valB = b[sortColumn];
+                    if (typeof valA === 'string') valA = valA.toLowerCase();
+                    if (typeof valB === 'string') valB = valB.toLowerCase();
+                    if (valA < valB) return sortAsc ? -1 : 1;
+                    if (valA > valB) return sortAsc ? 1 : -1;
+                    return 0;
+                });
+            }
+            
+            const rows = stocks.map(s => {
                 const changeClass = (s.change || 0) >= 0 ? 'positive' : 'negative';
                 const color = (s.change || 0) >= 0 ? '#22c55e' : '#ef4444';
                 return `
-                    <tr>
-                        <td><strong>${s.ticker}</strong><br><span style="color:#64748b;font-size:12px;">${(s.name || '').substring(0, 20)}</span></td>
+                    <tr class="data-row" onclick="viewStock('${s.ticker}')">
+                        <td>
+                            <strong>${s.ticker}</strong>
+                            <button class="remove-btn" onclick="event.stopPropagation(); removeStock('${s.ticker}')">✕</button>
+                            <br><span style="color:#64748b;font-size:12px;">${(s.name || '').substring(0, 20)}</span>
+                        </td>
                         <td style="font-weight:600;">$${s.price?.toFixed(2) || 'N/A'}</td>
                         <td class="${changeClass}">${(s.change || 0).toFixed(2)}%</td>
                         <td>${makeSparkline(s.history, color)}</td>
@@ -342,18 +798,42 @@ COMPARISON_HTML = '''<!DOCTYPE html>
                 `;
             }).join('');
             
+            // Period buttons
+            const periods = [
+                { key: '1d', label: '1D' },
+                { key: '5d', label: '5D' },
+                { key: '1mo', label: '1M' },
+                { key: '3mo', label: '3M' },
+                { key: '6mo', label: '6M' },
+                { key: '1y', label: '1Y' }
+            ];
+            
+            const periodBtns = periods.map(p => 
+                `<button class="period-btn ${data.period === p.key ? 'active' : ''}" onclick="requestPeriod('${p.key}')">${p.label}</button>`
+            ).join('');
+            
+            const sortIcon = (col) => sortColumn === col ? (sortAsc ? '↑' : '↓') : '↕';
+            const sortedClass = (col) => sortColumn === col ? 'sorted' : '';
+            
             app.innerHTML = `
-                <h2>📊 Stock Comparison</h2>
+                <div class="header">
+                    <h2>📊 Stock Comparison</h2>
+                    <div class="controls">
+                        <div class="period-selector">${periodBtns}</div>
+                        <input type="text" id="addStockInput" class="add-input" placeholder="TICKER" maxlength="5" onkeypress="if(event.key==='Enter')addStock()">
+                        <button class="add-btn" onclick="addStock()">+ Add</button>
+                    </div>
+                </div>
                 <table>
                     <thead>
                         <tr>
-                            <th>Stock</th>
-                            <th>Price</th>
-                            <th>Change</th>
+                            <th class="${sortedClass('ticker')}" onclick="sortBy('ticker')">Stock <span class="sort-icon">${sortIcon('ticker')}</span></th>
+                            <th class="${sortedClass('price')}" onclick="sortBy('price')">Price <span class="sort-icon">${sortIcon('price')}</span></th>
+                            <th class="${sortedClass('change')}" onclick="sortBy('change')">Change <span class="sort-icon">${sortIcon('change')}</span></th>
                             <th>${data.trendLabel || 'Trend'}</th>
-                            <th>Market Cap</th>
-                            <th>P/E</th>
-                            <th>Div Yield</th>
+                            <th class="${sortedClass('marketCap')}" onclick="sortBy('marketCap')">Market Cap <span class="sort-icon">${sortIcon('marketCap')}</span></th>
+                            <th class="${sortedClass('pe')}" onclick="sortBy('pe')">P/E <span class="sort-icon">${sortIcon('pe')}</span></th>
+                            <th class="${sortedClass('dividend')}" onclick="sortBy('dividend')">Div Yield <span class="sort-icon">${sortIcon('dividend')}</span></th>
                         </tr>
                     </thead>
                     <tbody>${rows}</tbody>
