@@ -632,6 +632,12 @@ STOCK_CARD_HTML = '''<!DOCTYPE html>
                 tooltip.classList.remove('visible');
             });
         }
+        
+        // Auto-render if data is embedded
+        if (currentData && currentData.ticker) {
+            log('Auto-rendering with embedded data for: ' + currentData.ticker);
+            renderStock(currentData);
+        }
     </script>
 </body>
 </html>'''
@@ -1030,6 +1036,12 @@ COMPARISON_HTML = '''<!DOCTYPE html>
             `;
             app.className = '';
         }
+        
+        // Auto-render if data is embedded
+        if (currentData && currentData.stocks) {
+            log('Auto-rendering comparison with embedded data');
+            renderComparison(currentData);
+        }
     </script>
 </body>
 </html>'''
@@ -1062,11 +1074,13 @@ async def read_resource(uri: str):
     uri_str = str(uri)  # Convert AnyUrl to string if needed
     import sys
     print(f"[DEBUG] read_resource called with uri: {repr(uri_str)}", file=sys.stderr)
+    print(f"[DEBUG] _last_stock_data has data: {bool(_last_stock_data)}, ticker: {_last_stock_data.get('ticker', 'N/A') if _last_stock_data else 'N/A'}", file=sys.stderr)
     
     if uri_str == "ui://yfinance/stock-card":
         # Embed the last stock data into the HTML so it renders immediately
         if _last_stock_data:
             data_json = json.dumps(_last_stock_data)
+            print(f"[DEBUG] Data JSON length: {len(data_json)}", file=sys.stderr)
             # Inject the data into the HTML
             html = STOCK_CARD_HTML.replace(
                 'let currentData = null;',
@@ -1078,13 +1092,9 @@ async def read_resource(uri: str):
                 "let currentPeriod = '1mo';",
                 f"let currentPeriod = '{_last_stock_data.get('period', '1mo')}';"
             )
-            # Add auto-render on load
-            html = html.replace(
-                "log('UI loaded, waiting for data...');",
-                "log('UI loaded with embedded data'); if (currentData) { renderStock(currentData); }"
-            )
-            print(f"[DEBUG] Returning HTML with embedded data for {_last_stock_data.get('ticker')}", file=sys.stderr)
+            print(f"[DEBUG] Returning HTML with embedded data for {_last_stock_data.get('ticker')}, length: {len(html)}", file=sys.stderr)
             return html
+        print(f"[DEBUG] No stock data available, returning static template", file=sys.stderr)
         return STOCK_CARD_HTML
     elif uri_str == "ui://yfinance/comparison":
         # Embed the last comparison data into the HTML
@@ -1100,11 +1110,6 @@ async def read_resource(uri: str):
             ).replace(
                 "let currentPeriod = '1mo';",
                 f"let currentPeriod = '{_last_comparison_data.get('period', '1mo')}';"
-            )
-            # Add auto-render on load
-            html = html.replace(
-                "log('Comparison UI loaded');",
-                "log('Comparison UI loaded with embedded data'); if (currentData) { renderComparison(currentData); }"
             )
             print(f"[DEBUG] Returning HTML with embedded comparison data", file=sys.stderr)
             return html
