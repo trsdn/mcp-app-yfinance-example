@@ -95,7 +95,12 @@ cython_debug/
 # Claude Code local settings
 .claude/*
 
+# GitHub config (keep copilot-instructions.md only)
 .github/*
+!.github/copilot-instructions.md
+
+# MCP Apps skills (local development only)
+.github/skills/
 
 # OS
 .DS_Store
