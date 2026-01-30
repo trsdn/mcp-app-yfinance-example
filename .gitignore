@@ -85,9 +85,17 @@ cython_debug/
 
 # IDE
 .idea/
-.vscode/
 *.swp
 *.swo
+
+# Keep .vscode/mcp.json but ignore other VS Code files
+.vscode/*
+!.vscode/mcp.json
+
+# Claude Code local settings
+.claude/*
+
+.github/*
 
 # OS
 .DS_Store
@@ -95,4 +103,9 @@ Thumbs.db
 
 # uv
 .uv/
-uv.lock
+
+# Test artifacts
+test_*.html
+test_*.py
+*_output.html
+tmpclaude-*

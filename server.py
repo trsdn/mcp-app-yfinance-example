@@ -1,20 +1,19 @@
 """
-YFinance MCP Server with MCP Apps UI Support
-Implements the MCP Apps spec (SEP-1865) with predeclared UI resources.
+YFinance MCP Server with HTTP/SSE transport for MCP Apps
 """
-
-import json
+import asyncio
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent, CallToolResult, Resource, ResourceContents, TextResourceContents
+from mcp.types import Tool, TextContent, CallToolResult, Resource
+from mcp.server.sse import SseServerTransport
 import yfinance as yf
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.requests import Request
+import uvicorn
+import sys
 
 
-app = Server("yfinance-mcp")
-
-# Store for dynamic data that will be passed to the UI
-_last_stock_data = {}
-_last_comparison_data = {}
+app_server = Server("yfinance-http")
 
 
 def format_number(num):
@@ -32,1429 +31,363 @@ def format_number(num):
     return str(num)
 
 
-# ============== UI Resource Templates ==============
-
+# Full stock card HTML with postMessage handshake and period switcher
 STOCK_CARD_HTML = '''<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stock Card</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { 
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-            color: #f1f5f9;
-            padding: 16px;
-            min-height: 200px;
-        }
-        .card {
-            background: rgba(30, 41, 59, 0.8);
-            border-radius: 12px;
-            padding: 20px;
-            border: 1px solid rgba(148, 163, 184, 0.1);
-        }
-        .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; }
-        .ticker { font-size: 14px; color: #94a3b8; font-weight: 500; }
-        .name { font-size: 18px; font-weight: 600; margin-top: 4px; }
-        .price { font-size: 28px; font-weight: 700; }
-        .change { font-size: 14px; margin-top: 4px; }
-        .change.positive { color: #22c55e; }
-        .change.negative { color: #ef4444; }
-        .period-label { font-size: 11px; color: #64748b; margin-top: 2px; }
-        
-        /* Period selector */
-        .controls { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-        .period-selector { display: flex; gap: 4px; }
-        .period-btn {
-            padding: 6px 10px;
-            font-size: 11px;
-            font-weight: 500;
-            border: none;
-            border-radius: 6px;
-            background: rgba(15, 23, 42, 0.5);
-            color: #94a3b8;
-            cursor: pointer;
-            transition: all 0.15s ease;
-        }
-        .period-btn:hover { background: rgba(51, 65, 85, 0.8); color: #f1f5f9; }
-        .period-btn.active { background: #3b82f6; color: white; }
-        
-        /* Chart with tooltip */
-        .chart-container { position: relative; height: 100px; background: rgba(15, 23, 42, 0.3); border-radius: 8px; padding: 8px; margin: 12px 0; }
-        .chart-container svg { cursor: crosshair; }
-        .tooltip {
-            position: absolute;
-            background: rgba(15, 23, 42, 0.95);
-            border: 1px solid rgba(148, 163, 184, 0.2);
-            border-radius: 6px;
-            padding: 8px 12px;
-            font-size: 12px;
-            pointer-events: none;
-            opacity: 0;
-            transition: opacity 0.15s ease;
-            z-index: 10;
-            white-space: nowrap;
-        }
-        .tooltip.visible { opacity: 1; }
-        .tooltip-price { font-weight: 600; font-size: 14px; }
-        .tooltip-date { color: #64748b; margin-top: 2px; }
-        
-        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 16px; }
-        .stat { text-align: center; padding: 8px; background: rgba(15, 23, 42, 0.5); border-radius: 8px; cursor: pointer; transition: all 0.15s ease; }
-        .stat:hover { background: rgba(51, 65, 85, 0.6); transform: translateY(-1px); }
-        .stat-label { font-size: 11px; color: #64748b; text-transform: uppercase; }
-        .stat-value { font-size: 14px; font-weight: 600; margin-top: 4px; }
-        .loading { display: flex; align-items: center; justify-content: center; height: 200px; color: #94a3b8; }
-        
-        /* Prompt hint */
-        .prompt-hint {
-            position: fixed; bottom: 16px; left: 16px; right: 16px;
-            background: rgba(59, 130, 246, 0.9); color: white;
-            padding: 12px 16px; border-radius: 8px;
-            display: flex; justify-content: space-between; align-items: center;
-            font-size: 13px; z-index: 100;
-        }
-        .prompt-hint button {
-            padding: 6px 12px; border: none; border-radius: 6px;
-            background: white; color: #1e40af; cursor: pointer; font-weight: 500;
-        }
-    </style>
-</head>
-<body>
-    <div id="app" class="loading">Loading stock data...</div>
-    
-    <script>
-        // ===== MCP Apps JSON-RPC Communication (SEP-1865) =====
-        const pending = new Map();
-        let nextId = 1;
-        let initialized = false;
-        let hostContext = null;
-        
-        let currentData = null;
-        let currentTicker = null;
-        let currentPeriod = '1mo';
-
-        const periods = [
-            { id: '1d', label: '1D' },
-            { id: '5d', label: '5D' },
-            { id: '1mo', label: '1M' },
-            { id: '3mo', label: '3M' },
-            { id: '6mo', label: '6M' },
-            { id: '1y', label: '1Y' }
-        ];
-
-        // JSON-RPC request helper with promise tracking
-        function request(method, params) {
-            const id = nextId++;
-            return new Promise((resolve, reject) => {
-                pending.set(id, { resolve, reject });
-                window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
-            });
-        }
-        
-        // Apply host theme/styles
-        function applyHostContext(ctx) {
-            if (!ctx) return;
-            hostContext = ctx;
-            if (ctx.theme) {
-                document.documentElement.style.colorScheme = ctx.theme;
-            }
-            if (ctx.styles?.variables) {
-                for (const [k, v] of Object.entries(ctx.styles.variables)) {
-                    document.documentElement.style.setProperty(k, v);
-                }
-            }
-        }
-
-        // Message handler for all JSON-RPC traffic
-        window.addEventListener('message', (e) => {
-            const msg = e.data;
-            if (!msg?.jsonrpc) return;
-            
-            console.log('[StockCard] Received:', msg.method || 'response', msg);
-            
-            // Handle responses to our requests
-            if (msg.id && pending.has(msg.id)) {
-                const { resolve, reject } = pending.get(msg.id);
-                pending.delete(msg.id);
-                msg.error ? reject(msg.error) : resolve(msg.result);
-                return;
-            }
-            
-            // Handle notifications from host
-            switch (msg.method) {
-                case 'ui/notifications/tool-input':
-                    // Tool arguments ready (before execution)
-                    if (msg.params?.arguments) {
-                        currentTicker = msg.params.arguments.ticker;
-                        currentPeriod = msg.params.arguments.period || '1mo';
-                        console.log('[StockCard] Tool input:', currentTicker, currentPeriod);
-                    }
-                    break;
-                    
-                case 'ui/notifications/tool-result':
-                    // Tool completed with results
-                    if (msg.params?.structuredContent) {
-                        currentData = msg.params.structuredContent;
-                        currentTicker = currentData.ticker;
-                        currentPeriod = currentData.period || '1mo';
-                        renderStock(currentData);
-                    }
-                    break;
-                    
-                case 'ui/notifications/host-context-changed':
-                    applyHostContext(msg.params);
-                    break;
-                    
-                case 'ui/notifications/tool-cancelled':
-                    console.log('[StockCard] Tool cancelled:', msg.params?.reason);
-                    break;
-            }
-        });
-
-        // Initialize handshake (required by MCP Apps spec)
-        async function initializeApp() {
-            try {
-                const result = await request('ui/initialize', { 
-                    protocolVersion: '2025-11-21',
-                    capabilities: {}
-                });
-                console.log('[StockCard] Initialize response:', result);
-                
-                // Apply host context from init response
-                if (result?.hostContext) {
-                    applyHostContext(result.hostContext);
-                }
-                
-                // Send initialized notification to complete handshake
-                window.parent.postMessage({ 
-                    jsonrpc: '2.0', 
-                    method: 'ui/notifications/initialized' 
-                }, '*');
-                
-                initialized = true;
-                console.log('[StockCard] Handshake complete');
-            } catch (e) {
-                console.error('[StockCard] Initialize failed:', e);
-            }
-        }
-        
-        // Call another MCP tool (per spec: tools/call)
-        async function callTool(name, args) {
-            if (!initialized) {
-                console.warn('[StockCard] Not initialized, cannot call tool');
-                return null;
-            }
-            try {
-                const result = await request('tools/call', { name, arguments: args });
-                console.log('[StockCard] Tool result:', result);
-                return result;
-            } catch (e) {
-                console.error('[StockCard] Tool call failed:', e);
-                return null;
-            }
-        }
-        
-        async function changePeriod(period) {
-            if (period === currentPeriod || !currentTicker) return;
-
-            console.log('[StockCard] Changing period to', period);
-
-            // Update button states immediately
-            document.querySelectorAll('.period-btn').forEach(btn => {
-                btn.classList.toggle('active', btn.dataset.period === period);
-            });
-
-            // Try calling the tool via MCP
-            const result = await callTool('get_stock_quote', { 
-                ticker: currentTicker, 
-                period: period 
-            });
-            
-            if (result?.structuredContent) {
-                currentData = result.structuredContent;
-                currentPeriod = period;
-                renderStock(currentData);
-            } else {
-                // Fallback: show prompt hint for user to copy
-                const periodLabels = {
-                    '1d': '1 day', '5d': '5 day', '1mo': '1 month',
-                    '3mo': '3 month', '6mo': '6 month', '1y': '1 year'
-                };
-                showPromptHint(`Get ${periodLabels[period] || period} ${currentTicker} stock quote`);
-            }
-        }
-        
-        function showPromptHint(prompt) {
-            const existing = document.querySelector('.prompt-hint');
-            if (existing) existing.remove();
-            
-            const hint = document.createElement('div');
-            hint.className = 'prompt-hint';
-            hint.innerHTML = `<span>💡 Ask: "${prompt}"</span><button onclick="navigator.clipboard.writeText('${prompt}'); this.textContent='Copied!'">📋 Copy</button>`;
-            document.body.appendChild(hint);
-            setTimeout(() => hint.remove(), 6000);
-        }
-        
-        function renderStock(data) {
-            const appEl = document.getElementById('app');
-            if (!appEl) return;
-            
-            currentTicker = data.ticker;
-            currentPeriod = data.period || '1mo';
-            
-            const changeClass = data.change >= 0 ? 'positive' : 'negative';
-            const changeSymbol = data.change >= 0 ? '▲' : '▼';
-            const color = data.change >= 0 ? '#22c55e' : '#ef4444';
-            
-            // Build period buttons
-            const periodButtons = periods.map(p => 
-                `<button class="period-btn ${p.id === currentPeriod ? 'active' : ''}" data-period="${p.id}" onclick="window.changePeriod('${p.id}')">${p.label}</button>`
-            ).join('');
-            
-            // Build chart with hover data
-            let chartHtml = '';
-            if (data.history && data.history.length >= 2) {
-                const prices = data.history;
-                const minP = Math.min(...prices) * 0.99;
-                const maxP = Math.max(...prices) * 1.01;
-                const rangeP = maxP - minP || 1;
-                const step = 300 / (prices.length - 1);
-                
-                const points = prices.map((p, i) => {
-                    const x = i * step;
-                    const y = 80 - ((p - minP) / rangeP * 70);
-                    return `${x.toFixed(1)},${y.toFixed(1)}`;
-                }).join(' ');
-                
-                // Create invisible circles for hover
-                const circles = prices.map((p, i) => {
-                    const x = i * step;
-                    const y = 80 - ((p - minP) / rangeP * 70);
-                    return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="6" fill="transparent" data-price="${p.toFixed(2)}" data-index="${i}"/>`;
-                }).join('');
-                
-                const areaPoints = points + ' 300,85 0,85';
-                
-                chartHtml = `
-                    <div class="chart-container" id="chartContainer">
-                        <svg width="100%" height="80" viewBox="0 0 300 90" preserveAspectRatio="none" id="chartSvg">
-                            <defs>
-                                <linearGradient id="chartGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-                                    <stop offset="0%" style="stop-color:${color};stop-opacity:0.3"/>
-                                    <stop offset="100%" style="stop-color:${color};stop-opacity:0.05"/>
-                                </linearGradient>
-                            </defs>
-                            <polygon fill="url(#chartGradient)" points="${areaPoints}"/>
-                            <polyline fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" points="${points}"/>
-                            <circle id="hoverCircle" cx="0" cy="0" r="4" fill="${color}" stroke="white" stroke-width="2" style="display:none"/>
-                            ${circles}
-                        </svg>
-                        <div class="tooltip" id="tooltip">
-                            <div class="tooltip-price" id="tooltipPrice"></div>
-                            <div class="tooltip-date" id="tooltipDate"></div>
-                        </div>
-                    </div>
-                `;
-            }
-            
-            const low52w = data.fiftyTwoWeekLow ? '$' + data.fiftyTwoWeekLow.toFixed(0) : 'N/A';
-            const high52w = data.fiftyTwoWeekHigh ? '$' + data.fiftyTwoWeekHigh.toFixed(0) : 'N/A';
-            
-            appEl.innerHTML = `
-                <div class="card">
-                    <div class="header">
-                        <div>
-                            <div class="ticker">${data.ticker}</div>
-                            <div class="name">${data.name}</div>
-                        </div>
-                        <div style="text-align:right;">
-                            <div class="price">$${data.price.toFixed(2)}</div>
-                            <div class="change ${changeClass}">${changeSymbol} ${Math.abs(data.change).toFixed(2)}% ($${Math.abs(data.changeAmount).toFixed(2)})</div>
-                            <div class="period-label">${data.periodLabel || currentPeriod}</div>
-                        </div>
-                    </div>
-                    <div class="controls">
-                        <div class="period-selector">${periodButtons}</div>
-                    </div>
-                    ${chartHtml}
-                    <div class="stats">
-                        <div class="stat">
-                            <div class="stat-label">Volume</div>
-                            <div class="stat-value">${data.volumeFormatted || 'N/A'}</div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat-label">Market Cap</div>
-                            <div class="stat-value">${data.marketCapFormatted || 'N/A'}</div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat-label">52W Range</div>
-                            <div class="stat-value">${low52w} - ${high52w}</div>
-                        </div>
-                    </div>
-                </div>
-            `;
-            appEl.className = '';
-            
-            // Setup chart hover
-            setupChartHover(data.history, color);
-        }
-        
-        function setupChartHover(prices, color) {
-            const svg = document.getElementById('chartSvg');
-            const container = document.getElementById('chartContainer');
-            if (!svg || !container || !prices) return;
-            
-            const tooltip = document.getElementById('tooltip');
-            const hoverCircle = document.getElementById('hoverCircle');
-            
-            svg.addEventListener('mousemove', (e) => {
-                const rect = svg.getBoundingClientRect();
-                const x = e.clientX - rect.left;
-                const relX = (x / rect.width) * 300;
-                
-                const minP = Math.min(...prices) * 0.99;
-                const maxP = Math.max(...prices) * 1.01;
-                const rangeP = maxP - minP || 1;
-                const step = 300 / (prices.length - 1);
-                const index = Math.min(Math.max(Math.round(relX / step), 0), prices.length - 1);
-                const price = prices[index];
-                
-                const px = index * step;
-                const py = 80 - ((price - minP) / rangeP * 70);
-                
-                hoverCircle.setAttribute('cx', px);
-                hoverCircle.setAttribute('cy', py);
-                hoverCircle.style.display = 'block';
-                
-                const daysAgo = prices.length - 1 - index;
-                const dateLabel = daysAgo === 0 ? 'Today' : daysAgo === 1 ? 'Yesterday' : `${daysAgo} days ago`;
-                
-                document.getElementById('tooltipPrice').textContent = '$' + price.toFixed(2);
-                document.getElementById('tooltipDate').textContent = dateLabel;
-                
-                const tooltipX = (px / 300) * rect.width;
-                tooltip.style.left = Math.min(tooltipX, rect.width - 100) + 'px';
-                tooltip.style.top = '-40px';
-                tooltip.classList.add('visible');
-            });
-            
-            svg.addEventListener('mouseleave', () => {
-                hoverCircle.style.display = 'none';
-                tooltip.classList.remove('visible');
-            });
-        }
-        
-        // XSS prevention helper
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-        
-        // Expose to global for onclick handlers
-        window.changePeriod = changePeriod;
-        
-        // Initialize: start handshake, then render embedded data if available
-        initializeApp().then(() => {
-            // Auto-render if data is embedded (fallback for when postMessage flow doesn't work)
-            if (currentData && currentData.ticker) {
-                renderStock(currentData);
-            }
-        });
-    <\/script>
-</body>
-</html>'''
-
-
-
-
-
-COMPARISON_HTML = '''<!DOCTYPE html>
 <html>
 <head>
-    <meta charset="UTF-8">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { 
-            font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif);
-            background: var(--color-background-primary, linear-gradient(135deg, #1e293b 0%, #0f172a 100%));
-            color: var(--color-text-primary, #f1f5f9);
-            padding: 16px;
-        }
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 16px;
-        }
-        h2 {
-            font-size: 18px;
-        }
-        .controls {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-        }
-        .period-selector {
-            display: flex;
-            gap: 4px;
-        }
-        .period-btn {
-            padding: 6px 10px;
-            font-size: 11px;
-            font-weight: 500;
-            border: none;
-            border-radius: 6px;
-            background: var(--color-background-tertiary, rgba(15, 23, 42, 0.5));
-            color: var(--color-text-secondary, #94a3b8);
-            cursor: pointer;
-            transition: all 0.15s ease;
-        }
-        .period-btn:hover {
-            background: rgba(51, 65, 85, 0.8);
-            color: #f1f5f9;
-        }
-        .period-btn.active {
-            background: var(--color-accent, #3b82f6);
-            color: white;
-        }
-        .add-input {
-            padding: 6px 10px;
-            font-size: 12px;
-            border: 1px solid rgba(148, 163, 184, 0.2);
-            border-radius: 6px;
-            background: var(--color-background-tertiary, rgba(15, 23, 42, 0.5));
-            color: #f1f5f9;
-            width: 80px;
-        }
-        .add-input::placeholder {
-            color: #64748b;
-        }
-        .add-btn {
-            padding: 6px 12px;
-            font-size: 12px;
-            border: none;
-            border-radius: 6px;
-            background: var(--color-accent, #3b82f6);
-            color: white;
-            cursor: pointer;
-            transition: all 0.15s ease;
-        }
-        .add-btn:hover {
-            background: #2563eb;
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            background: var(--color-background-secondary, rgba(30, 41, 59, 0.8));
-            border-radius: var(--border-radius-md, 8px);
-            overflow: hidden;
-        }
-        th, td {
-            padding: 12px;
-            text-align: left;
-            border-bottom: 1px solid var(--color-border-primary, rgba(148, 163, 184, 0.1));
-        }
-        th {
-            background: var(--color-background-tertiary, rgba(15, 23, 42, 0.5));
-            font-size: 11px;
-            text-transform: uppercase;
-            color: var(--color-text-tertiary, #64748b);
-            cursor: pointer;
-            user-select: none;
-        }
-        th:hover {
-            color: #f1f5f9;
-        }
-        th .sort-icon {
-            opacity: 0.5;
-            margin-left: 4px;
-        }
-        th.sorted .sort-icon {
-            opacity: 1;
-        }
-        tr.data-row {
-            cursor: pointer;
-            transition: all 0.15s ease;
-        }
-        tr.data-row:hover {
-            background: rgba(51, 65, 85, 0.5);
-        }
-        tr.data-row:active {
-            background: rgba(59, 130, 246, 0.2);
-        }
-        .positive { color: var(--color-text-success, #22c55e); }
-        .negative { color: var(--color-text-danger, #ef4444); }
-        .loading {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            height: 200px;
-            color: var(--color-text-secondary, #94a3b8);
-        }
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-        .spinner {
-            width: 20px;
-            height: 20px;
-            border: 2px solid rgba(148, 163, 184, 0.3);
-            border-top-color: #3b82f6;
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-            margin-right: 8px;
-        }
-        .remove-btn {
-            opacity: 0;
-            padding: 2px 6px;
-            font-size: 10px;
-            border: none;
-            border-radius: 4px;
-            background: rgba(239, 68, 68, 0.2);
-            color: #ef4444;
-            cursor: pointer;
-            margin-left: 8px;
-        }
-        tr:hover .remove-btn {
-            opacity: 1;
-        }
-    </style>
+<meta charset="UTF-8">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0f172a; color: #e2e8f0; padding: 16px; min-height: 200px; }
+.loading { display: flex; align-items: center; justify-content: center; height: 150px; color: #64748b; }
+.card { display: none; }
+.header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+.ticker { font-size: 24px; font-weight: 700; color: #f8fafc; }
+.name { font-size: 12px; color: #64748b; margin-top: 2px; }
+.price { font-size: 28px; font-weight: 700; text-align: right; }
+.change { font-size: 14px; margin-top: 4px; }
+.positive { color: #22c55e; }
+.negative { color: #ef4444; }
+.periods { display: flex; gap: 4px; margin-bottom: 12px; }
+.period-btn { background: #1e293b; border: none; color: #94a3b8; padding: 6px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; transition: all 0.15s; }
+.period-btn:hover { background: #334155; color: #e2e8f0; }
+.period-btn.active { background: #3b82f6; color: #fff; }
+.period-btn:disabled { opacity: 0.5; cursor: wait; }
+.chart-container { height: 120px; margin: 12px 0; position: relative; }
+canvas { width: 100%; height: 100%; }
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding-top: 12px; border-top: 1px solid #1e293b; }
+.stat { text-align: center; }
+.stat-label { font-size: 10px; color: #64748b; text-transform: uppercase; }
+.stat-value { font-size: 14px; font-weight: 600; margin-top: 2px; }
+</style>
 </head>
 <body>
-    <div id="app" class="loading"><div class="spinner"></div> Loading comparison...</div>
-    
-    <script>
-        let currentTickers = [];
-        let currentPeriod = '1mo';
-        let currentData = null;
-        let sortColumn = null;
-        let sortAsc = true;
-        let requestId = 1;
-        
-        window.addEventListener('message', function(event) {
-            const data = event.data;
-            if (data.method === 'ui/notifications/tool-result' && data.params?.structuredContent) {
-                currentData = data.params.structuredContent;
-                currentTickers = currentData.stocks.map(s => s.ticker);
-                currentPeriod = currentData.period || '1mo';
-                renderComparison(currentData);
-            }
-            if (data.method === 'ui/notifications/tool-input' && data.params?.arguments) {
-                currentTickers = data.params.arguments.tickers || [];
-                currentPeriod = data.params.arguments.period || '1mo';
-            }
-        });
-        
-        window.parent.postMessage({
-            jsonrpc: "2.0",
-            id: requestId++,
-            method: "ui/initialize",
-            params: { 
-                protocolVersion: "2026-01-26", 
-                appCapabilities: { invokeTools: true, setPrompt: true } 
-            }
-        }, '*');
-        
-        function getPeriodLabel(period) {
-            const labels = { '1d': '1 day', '5d': '5 day', '1mo': '1 month', '3mo': '3 month', '6mo': '6 month', '1y': '1 year' };
-            return labels[period] || period;
-        }
-        
-        function showPromptMessage(prompt) {
-            const existing = document.querySelector('.prompt-hint');
-            if (existing) existing.remove();
-            
-            const hint = document.createElement('div');
-            hint.className = 'prompt-hint';
-            const safePrompt = prompt.replace(/'/g, "\\'");
-            hint.innerHTML = `<span>💡 Ask: "${prompt}"</span><button onclick="copyPrompt('${safePrompt}')">📋 Copy</button><button onclick="sendPrompt('${safePrompt}')" style="margin-left:8px;background:#22c55e;">▶ Send</button>`;
-            hint.style.cssText = 'position:fixed;bottom:16px;left:16px;right:16px;background:rgba(59,130,246,0.9);color:white;padding:12px 16px;border-radius:8px;display:flex;justify-content:space-between;align-items:center;font-size:13px;z-index:100;';
-            document.body.appendChild(hint);
-            
-            setTimeout(() => hint.remove(), 8000);
-        }
-        
-        function copyPrompt(prompt) {
-            navigator.clipboard.writeText(prompt);
-            const hint = document.querySelector('.prompt-hint span');
-            if (hint) hint.textContent = '✓ Copied! Paste in chat.';
-        }
-        
-        function sendPrompt(prompt) {
-            // Try all possible methods to send the prompt
-            window.parent.postMessage({
-                jsonrpc: "2.0",
-                id: requestId++,
-                method: "ui/requests/send-message",
-                params: { message: prompt }
-            }, '*');
-            
-            window.parent.postMessage({
-                jsonrpc: "2.0",
-                id: requestId++,
-                method: "ui/requests/submit-prompt",
-                params: { prompt: prompt }
-            }, '*');
-            
-            const hint = document.querySelector('.prompt-hint span');
-            if (hint) hint.textContent = '⏳ Sending...';
-        }
-        
-        function requestPeriod(period) {
-            if (period === currentPeriod || currentTickers.length === 0) return;
-            
-            // Update button state
-            document.querySelectorAll('.period-btn').forEach(btn => {
-                btn.classList.toggle('active', btn.textContent === getPeriodLabel(period).replace(' ', '').toUpperCase().slice(0,2) || btn.dataset?.period === period);
-            });
-            
-            const prompt = `compare ${currentTickers.join(', ')} stocks for ${getPeriodLabel(period)}`;
-            showPromptMessage(prompt);
-            sendPrompt(prompt);
-            
-            // Also try invoke-tool
-            window.parent.postMessage({
-                jsonrpc: "2.0",
-                id: requestId++,
-                method: "ui/requests/invoke-tool",
-                params: {
-                    name: "compare_stocks",
-                    arguments: { tickers: currentTickers, period: period }
-                }
-            }, '*');
-        }
-        
-        function addStock() {
-            const input = document.getElementById('addStockInput');
-            const ticker = input.value.trim().toUpperCase();
-            if (!ticker || currentTickers.includes(ticker)) {
-                input.value = '';
-                return;
-            }
-            const newTickers = [...currentTickers, ticker];
-            input.value = '';
-            
-            const prompt = `compare ${newTickers.join(', ')} stocks`;
-            showPromptMessage(prompt);
-            sendPrompt(prompt);
-        }
-        
-        function removeStock(ticker) {
-            const newTickers = currentTickers.filter(t => t !== ticker);
-            if (newTickers.length === 0) {
-                showPromptMessage('Need at least one stock to compare');
-                return;
-            }
-            
-            const prompt = `compare ${newTickers.join(', ')} stocks`;
-            showPromptMessage(prompt);
-            sendPrompt(prompt);
-        }
-        
-        function viewStock(ticker) {
-            const prompt = `get ${getPeriodLabel(currentPeriod)} ${ticker} stock`;
-            showPromptMessage(prompt);
-            sendPrompt(prompt);
-        }
-        
-        function showLoading() {
-            document.getElementById('app').innerHTML = '<div class="spinner"></div> Updating...';
-            document.getElementById('app').className = 'loading';
-        }
-        
-        function sortBy(column) {
-            if (sortColumn === column) {
-                sortAsc = !sortAsc;
-            } else {
-                sortColumn = column;
-                sortAsc = column === 'ticker' || column === 'name';
-            }
-            renderComparison(currentData);
-        }
-        
-        function makeSparkline(history, color) {
-            if (!history || history.length < 2) return '—';
-            const prices = history.slice(-20);
-            const minP = Math.min(...prices) * 0.99;
-            const maxP = Math.max(...prices) * 1.01;
-            const rangeP = maxP - minP || 1;
-            const step = 80 / (prices.length - 1);
-            const points = prices.map((p, i) => `${(i * step).toFixed(1)},${(24 - ((p - minP) / rangeP * 20)).toFixed(1)}`).join(' ');
-            return `<svg width="80" height="24" viewBox="0 0 80 24"><polyline fill="none" stroke="${color}" stroke-width="1.5" stroke-linecap="round" points="${points}"/></svg>`;
-        }
-        
-        function renderComparison(data) {
-            const app = document.getElementById('app');
-            
-            // Sort stocks if needed
-            let stocks = [...data.stocks];
-            if (sortColumn) {
-                stocks.sort((a, b) => {
-                    let valA = a[sortColumn], valB = b[sortColumn];
-                    if (typeof valA === 'string') valA = valA.toLowerCase();
-                    if (typeof valB === 'string') valB = valB.toLowerCase();
-                    if (valA < valB) return sortAsc ? -1 : 1;
-                    if (valA > valB) return sortAsc ? 1 : -1;
-                    return 0;
-                });
-            }
-            
-            const rows = stocks.map(s => {
-                const changeClass = (s.change || 0) >= 0 ? 'positive' : 'negative';
-                const color = (s.change || 0) >= 0 ? '#22c55e' : '#ef4444';
-                return `
-                    <tr class="data-row" onclick="viewStock('${s.ticker}')">
-                        <td>
-                            <strong>${s.ticker}</strong>
-                            <button class="remove-btn" onclick="event.stopPropagation(); removeStock('${s.ticker}')">✕</button>
-                            <br><span style="color:#64748b;font-size:12px;">${(s.name || '').substring(0, 20)}</span>
-                        </td>
-                        <td style="font-weight:600;">$${s.price?.toFixed(2) || 'N/A'}</td>
-                        <td class="${changeClass}">${(s.change || 0).toFixed(2)}%</td>
-                        <td>${makeSparkline(s.history, color)}</td>
-                        <td>${s.marketCapFormatted || 'N/A'}</td>
-                        <td>${s.pe?.toFixed(1) || 'N/A'}</td>
-                        <td>${s.dividend ? (s.dividend * 100).toFixed(2) + '%' : 'N/A'}</td>
-                    </tr>
-                `;
-            }).join('');
-            
-            // Period buttons
-            const periods = [
-                { key: '1d', label: '1D' },
-                { key: '5d', label: '5D' },
-                { key: '1mo', label: '1M' },
-                { key: '3mo', label: '3M' },
-                { key: '6mo', label: '6M' },
-                { key: '1y', label: '1Y' }
-            ];
-            
-            const periodBtns = periods.map(p => 
-                `<button class="period-btn ${data.period === p.key ? 'active' : ''}" onclick="requestPeriod('${p.key}')">${p.label}</button>`
-            ).join('');
-            
-            const sortIcon = (col) => sortColumn === col ? (sortAsc ? '↑' : '↓') : '↕';
-            const sortedClass = (col) => sortColumn === col ? 'sorted' : '';
-            
-            app.innerHTML = `
-                <div class="header">
-                    <h2>📊 Stock Comparison</h2>
-                    <div class="controls">
-                        <div class="period-selector">${periodBtns}</div>
-                        <input type="text" id="addStockInput" class="add-input" placeholder="TICKER" maxlength="5" onkeypress="if(event.key==='Enter')addStock()">
-                        <button class="add-btn" onclick="addStock()">+ Add</button>
-                    </div>
-                </div>
-                <table>
-                    <thead>
-                        <tr>
-                            <th class="${sortedClass('ticker')}" onclick="sortBy('ticker')">Stock <span class="sort-icon">${sortIcon('ticker')}</span></th>
-                            <th class="${sortedClass('price')}" onclick="sortBy('price')">Price <span class="sort-icon">${sortIcon('price')}</span></th>
-                            <th class="${sortedClass('change')}" onclick="sortBy('change')">Change <span class="sort-icon">${sortIcon('change')}</span></th>
-                            <th>${data.trendLabel || 'Trend'}</th>
-                            <th class="${sortedClass('marketCap')}" onclick="sortBy('marketCap')">Market Cap <span class="sort-icon">${sortIcon('marketCap')}</span></th>
-                            <th class="${sortedClass('pe')}" onclick="sortBy('pe')">P/E <span class="sort-icon">${sortIcon('pe')}</span></th>
-                            <th class="${sortedClass('dividend')}" onclick="sortBy('dividend')">Div Yield <span class="sort-icon">${sortIcon('dividend')}</span></th>
-                        </tr>
-                    </thead>
-                    <tbody>${rows}</tbody>
-                </table>
-            `;
-            app.className = '';
-        }
-        
-        // Auto-render if data is embedded
-        if (currentData && currentData.stocks) {
-            renderComparison(currentData);
-        }
-    </script>
+<div id="loading" class="loading">Waiting for data...</div>
+<div id="card" class="card">
+  <div class="header">
+    <div>
+      <div id="ticker" class="ticker"></div>
+      <div id="name" class="name"></div>
+    </div>
+    <div>
+      <div id="price" class="price"></div>
+      <div id="change" class="change"></div>
+    </div>
+  </div>
+  <div class="periods">
+    <button class="period-btn" data-period="1d">1D</button>
+    <button class="period-btn" data-period="5d">5D</button>
+    <button class="period-btn" data-period="1mo">1M</button>
+    <button class="period-btn" data-period="3mo">3M</button>
+    <button class="period-btn" data-period="6mo">6M</button>
+    <button class="period-btn" data-period="1y">1Y</button>
+    <button class="period-btn" data-period="5y">5Y</button>
+  </div>
+  <div class="chart-container">
+    <canvas id="chart"></canvas>
+  </div>
+  <div class="stats">
+    <div class="stat"><div class="stat-label">Volume</div><div id="volume" class="stat-value"></div></div>
+    <div class="stat"><div class="stat-label">Market Cap</div><div id="mcap" class="stat-value"></div></div>
+    <div class="stat"><div class="stat-label">52W Range</div><div id="range" class="stat-value"></div></div>
+  </div>
+</div>
+<script>
+const pending = new Map();
+let nextId = 1;
+let currentTicker = '';
+let currentPeriod = '';
+
+function request(method, params) {
+  const id = nextId++;
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
+  });
+}
+
+function updatePeriodButtons(activePeriod) {
+  document.querySelectorAll('.period-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.period === activePeriod);
+    btn.disabled = false;
+  });
+}
+
+function switchPeriod(period) {
+  if (!currentTicker || period === currentPeriod) return;
+  document.querySelectorAll('.period-btn').forEach(btn => btn.disabled = true);
+  request('tools/call', {
+    name: 'get_stock_quote',
+    arguments: { ticker: currentTicker, period: period }
+  }).then(result => {
+    if (result && result.structuredContent) {
+      render(result.structuredContent);
+    }
+  }).catch(() => {
+    updatePeriodButtons(currentPeriod);
+  });
+}
+
+document.querySelectorAll('.period-btn').forEach(btn => {
+  btn.addEventListener('click', () => switchPeriod(btn.dataset.period));
+});
+
+function renderChart(canvas, history, isPositive) {
+  if (!history || history.length < 2) return;
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  
+  const w = rect.width, h = rect.height;
+  const min = Math.min(...history), max = Math.max(...history);
+  const range = max - min || 1;
+  const pad = 4;
+  
+  ctx.beginPath();
+  ctx.strokeStyle = isPositive ? '#22c55e' : '#ef4444';
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  
+  history.forEach((val, i) => {
+    const x = (i / (history.length - 1)) * w;
+    const y = h - pad - ((val - min) / range) * (h - pad * 2);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  
+  // Gradient fill
+  const gradient = ctx.createLinearGradient(0, 0, 0, h);
+  gradient.addColorStop(0, isPositive ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)');
+  gradient.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.lineTo(w, h);
+  ctx.lineTo(0, h);
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
+}
+
+function render(data) {
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('card').style.display = 'block';
+  
+  currentTicker = data.ticker;
+  currentPeriod = data.period;
+  
+  const isPositive = data.change >= 0;
+  const sign = isPositive ? '+' : '';
+  
+  document.getElementById('ticker').textContent = data.ticker;
+  document.getElementById('name').textContent = data.name || '';
+  document.getElementById('price').textContent = '$' + (data.price || 0).toFixed(2);
+  
+  const changeEl = document.getElementById('change');
+  changeEl.textContent = sign + (data.change || 0).toFixed(2) + '% (' + sign + '$' + (data.changeAmount || 0).toFixed(2) + ')';
+  changeEl.className = 'change ' + (isPositive ? 'positive' : 'negative');
+  document.getElementById('price').className = 'price ' + (isPositive ? 'positive' : 'negative');
+  
+  document.getElementById('volume').textContent = data.volumeFormatted || 'N/A';
+  document.getElementById('mcap').textContent = data.marketCapFormatted || 'N/A';
+  document.getElementById('range').textContent = (data.fiftyTwoWeekLow ? '$' + data.fiftyTwoWeekLow.toFixed(0) : '?') + ' - ' + (data.fiftyTwoWeekHigh ? '$' + data.fiftyTwoWeekHigh.toFixed(0) : '?');
+  
+  updatePeriodButtons(data.period);
+  renderChart(document.getElementById('chart'), data.history, isPositive);
+}
+
+window.addEventListener('message', (e) => {
+  const msg = e.data;
+  if (!msg || !msg.jsonrpc) return;
+  
+  // Handle responses to our requests
+  if (msg.id && pending.has(msg.id)) {
+    const { resolve, reject } = pending.get(msg.id);
+    pending.delete(msg.id);
+    msg.error ? reject(msg.error) : resolve(msg.result);
+    return;
+  }
+  
+  // Handle notifications from host
+  if (msg.method === 'ui/notifications/tool-result') {
+    const sc = msg.params && msg.params.structuredContent;
+    if (sc) render(sc);
+  }
+  if (msg.method === 'ui/notifications/tool-input') {
+    // Could use input args if needed
+  }
+});
+
+// Initialize handshake
+request('ui/initialize', { protocolVersion: '2025-11-21' })
+  .then(() => {
+    window.parent.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/initialized' }, '*');
+  })
+  .catch(() => {
+    document.getElementById('loading').textContent = 'Init failed';
+  });
+''' + '</scr' + 'ipt>' + '''
 </body>
 </html>'''
 
 
-# ============== Resource Handlers ==============
-
-@app.list_resources()
+@app_server.list_resources()
 async def list_resources():
-    """List available UI resources."""
     return [
         Resource(
             uri="ui://yfinance/stock-card",
-            name="Stock Card UI",
-            description="Interactive stock quote card with chart",
-            mimeType="text/html;profile=mcp-app"
-        ),
-        Resource(
-            uri="ui://yfinance/comparison",
-            name="Stock Comparison UI", 
-            description="Side-by-side stock comparison table",
+            name="Stock Card",
+            description="Stock quote card",
             mimeType="text/html;profile=mcp-app"
         )
     ]
 
 
-@app.read_resource()
-async def read_resource(uri: str):
-    """Read a UI resource. Returns the HTML content with embedded data if available."""
-    uri_str = str(uri)  # Convert AnyUrl to string if needed
-    import sys
-    print(f"[DEBUG] read_resource called with uri: {repr(uri_str)}", file=sys.stderr)
-    print(f"[DEBUG] _last_stock_data has data: {bool(_last_stock_data)}, ticker: {_last_stock_data.get('ticker', 'N/A') if _last_stock_data else 'N/A'}", file=sys.stderr)
-    
-    if uri_str == "ui://yfinance/stock-card":
-        # Embed the last stock data into the HTML so it renders immediately
-        if _last_stock_data:
-            data_json = json.dumps(_last_stock_data)
-            print(f"[DEBUG] Data JSON length: {len(data_json)}", file=sys.stderr)
-            # Inject the data into the HTML
-            html = STOCK_CARD_HTML.replace(
-                'let currentData = null;',
-                f'let currentData = {data_json};'
-            ).replace(
-                'let currentTicker = null;',
-                f'let currentTicker = "{_last_stock_data.get("ticker", "")}";'
-            ).replace(
-                "let currentPeriod = '1mo';",
-                f"let currentPeriod = '{_last_stock_data.get('period', '1mo')}';"
-            )
-            print(f"[DEBUG] Returning HTML with embedded data for {_last_stock_data.get('ticker')}, length: {len(html)}", file=sys.stderr)
-            return html
-        print(f"[DEBUG] No stock data available, returning static template", file=sys.stderr)
+@app_server.read_resource()
+async def read_resource(uri: str) -> str:
+    """Return resource content as string. MIME type is set in list_resources."""
+    print(f"[HTTP] read_resource: {uri}", file=sys.stderr)
+    if str(uri) == "ui://yfinance/stock-card":
         return STOCK_CARD_HTML
-    elif uri_str == "ui://yfinance/comparison":
-        # Embed the last comparison data into the HTML
-        if _last_comparison_data:
-            data_json = json.dumps(_last_comparison_data)
-            tickers_json = json.dumps(_last_comparison_data.get("tickers", []))
-            html = COMPARISON_HTML.replace(
-                'let currentData = null;',
-                f'let currentData = {data_json};'
-            ).replace(
-                'let currentTickers = [];',
-                f'let currentTickers = {tickers_json};'
-            ).replace(
-                "let currentPeriod = '1mo';",
-                f"let currentPeriod = '{_last_comparison_data.get('period', '1mo')}';"
-            )
-            print(f"[DEBUG] Returning HTML with embedded comparison data", file=sys.stderr)
-            return html
-        return COMPARISON_HTML
-    else:
-        print(f"[DEBUG] Unknown resource URI: {repr(uri_str)}", file=sys.stderr)
-        raise ValueError(f"Unknown resource: {uri_str}")
+    raise ValueError(f"Unknown resource: {uri}")
 
 
-# ============== HTML Generation Helpers ==============
-
-def generate_stock_html(data):
-    """Generate HTML card for stock data (fallback for non-MCP-Apps clients)."""
-    change_class = "positive" if data.get("change", 0) >= 0 else "negative"
-    change_symbol = "▲" if data.get("change", 0) >= 0 else "▼"
-    color = "#22c55e" if data.get("change", 0) >= 0 else "#ef4444"
-    
-    # Pre-compute formatted values
-    price_str = f"${data.get('price', 0):.2f}"
-    change_amt_str = f"${abs(data.get('changeAmount', 0)):.2f}"
-    change_pct_str = f"{abs(data.get('change', 0)):.2f}%"
-    open_str = f"${data.get('open'):.2f}" if data.get('open') else "N/A"
-    high_str = f"${data.get('dayHigh'):.2f}" if data.get('dayHigh') else "N/A"
-    low_str = f"${data.get('dayLow'):.2f}" if data.get('dayLow') else "N/A"
-    low_52w = f"${data.get('fiftyTwoWeekLow'):.0f}" if data.get('fiftyTwoWeekLow') else "N/A"
-    high_52w = f"${data.get('fiftyTwoWeekHigh'):.0f}" if data.get('fiftyTwoWeekHigh') else "N/A"
-    range_52w = f"{low_52w} - {high_52w}"
-    
-    # Build chart SVG
-    chart_svg = ""
-    history = data.get("history", [])
-    if len(history) >= 2:
-        prices = history
-        min_p = min(prices) * 0.99
-        max_p = max(prices) * 1.01
-        range_p = max_p - min_p or 1
-        step = 300 / (len(prices) - 1)
-        
-        points = " ".join([
-            f"{i * step:.1f},{80 - ((p - min_p) / range_p * 70):.1f}"
-            for i, p in enumerate(prices)
-        ])
-        area_points = points + " 300,85 0,85"
-        
-        chart_svg = f'''
-            <svg width="100%" height="85" viewBox="0 0 300 85" preserveAspectRatio="none">
-                <defs>
-                    <linearGradient id="chartGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-                        <stop offset="0%" style="stop-color:{color};stop-opacity:0.3"/>
-                        <stop offset="100%" style="stop-color:{color};stop-opacity:0.05"/>
-                    </linearGradient>
-                </defs>
-                <polygon fill="url(#chartGradient)" points="{area_points}"/>
-                <polyline fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="{points}"/>
-            </svg>
-        '''
-    
-    return f'''<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ 
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-            color: #f1f5f9;
-            padding: 16px;
-            min-height: 200px;
-        }}
-        .card {{
-            background: rgba(30, 41, 59, 0.8);
-            border-radius: 12px;
-            padding: 20px;
-            border: 1px solid rgba(148, 163, 184, 0.1);
-        }}
-        .header {{
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            margin-bottom: 16px;
-        }}
-        .ticker {{
-            font-size: 14px;
-            color: #94a3b8;
-            font-weight: 500;
-        }}
-        .name {{
-            font-size: 18px;
-            font-weight: 600;
-            margin-top: 4px;
-        }}
-        .price-section {{
-            text-align: right;
-        }}
-        .price {{
-            font-size: 28px;
-            font-weight: 700;
-        }}
-        .change {{
-            font-size: 14px;
-            margin-top: 4px;
-            color: {color};
-        }}
-        .chart {{
-            margin: 20px 0;
-            height: 100px;
-            background: rgba(15, 23, 42, 0.3);
-            border-radius: 8px;
-            padding: 8px;
-        }}
-        .chart-label {{
-            display: flex;
-            justify-content: space-between;
-            font-size: 10px;
-            color: #64748b;
-            margin-top: 4px;
-        }}
-        .stats {{
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 12px;
-            margin-top: 16px;
-        }}
-        .stat {{
-            text-align: center;
-            padding: 8px;
-            background: rgba(15, 23, 42, 0.5);
-            border-radius: 8px;
-        }}
-        .stat-label {{
-            font-size: 11px;
-            color: #64748b;
-            text-transform: uppercase;
-        }}
-        .stat-value {{
-            font-size: 14px;
-            font-weight: 600;
-            margin-top: 4px;
-        }}
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="header">
-            <div>
-                <div class="ticker">{data.get("ticker", "N/A")}</div>
-                <div class="name">{data.get("name", "N/A")}</div>
-            </div>
-            <div class="price-section">
-                <div class="price">{price_str}</div>
-                <div class="change">{change_symbol} {change_amt_str} ({change_pct_str})</div>
-            </div>
-        </div>
-        
-        <div class="chart">
-            {chart_svg}
-            <div class="chart-label">
-                <span>{data.get("periodLabel", "1 month")} ago</span>
-                <span>Today</span>
-            </div>
-        </div>
-        
-        <div class="stats">
-            <div class="stat">
-                <div class="stat-label">Open</div>
-                <div class="stat-value">{open_str}</div>
-            </div>
-            <div class="stat">
-                <div class="stat-label">High</div>
-                <div class="stat-value">{high_str}</div>
-            </div>
-            <div class="stat">
-                <div class="stat-label">Low</div>
-                <div class="stat-value">{low_str}</div>
-            </div>
-            <div class="stat">
-                <div class="stat-label">Volume</div>
-                <div class="stat-value">{data.get("volumeFormatted", "N/A")}</div>
-            </div>
-            <div class="stat">
-                <div class="stat-label">Market Cap</div>
-                <div class="stat-value">{data.get("marketCapFormatted", "N/A")}</div>
-            </div>
-            <div class="stat">
-                <div class="stat-label">52W Range</div>
-                <div class="stat-value">{range_52w}</div>
-            </div>
-        </div>
-    </div>
-</body>
-</html>'''
-
-
-def generate_comparison_html(data):
-    """Generate HTML comparison table for multiple stocks (fallback for non-MCP-Apps clients)."""
-    rows = ""
-    for s in data.get("stocks", []):
-        change = s.get("change", 0)
-        change_class = "positive" if change >= 0 else "negative"
-        color = "#22c55e" if change >= 0 else "#ef4444"
-        
-        # Pre-compute formatted values
-        price_str = f"${s.get('price'):.2f}" if s.get('price') else "N/A"
-        pe_str = f"{s.get('pe'):.1f}" if s.get('pe') else "N/A"
-        div_str = f"{(s.get('dividend', 0) or 0) * 100:.2f}%"
-        
-        # Generate mini sparkline
-        sparkline = "—"
-        history = s.get("history", [])
-        if len(history) >= 2:
-            prices = history[-20:]
-            min_p = min(prices) * 0.99
-            max_p = max(prices) * 1.01
-            range_p = max_p - min_p or 1
-            step = 80 / (len(prices) - 1)
-            points = " ".join([f"{i * step:.1f},{24 - ((p - min_p) / range_p * 20):.1f}" for i, p in enumerate(prices)])
-            sparkline = f'<svg width="80" height="24" viewBox="0 0 80 24"><polyline fill="none" stroke="{color}" stroke-width="1.5" stroke-linecap="round" points="{points}"/></svg>'
-        
-        rows += f'''
-            <tr>
-                <td><strong>{s.get("ticker", "N/A")}</strong><br><span style="color:#64748b;font-size:12px;">{(s.get("name", "")[:20])}</span></td>
-                <td style="font-weight:600;">{price_str}</td>
-                <td class="{change_class}">{change:.2f}%</td>
-                <td>{sparkline}</td>
-                <td>{s.get("marketCapFormatted", "N/A")}</td>
-                <td>{pe_str}</td>
-                <td>{div_str}</td>
-            </tr>
-        '''
-    
-    return f'''<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ 
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-            color: #f1f5f9;
-            padding: 16px;
-        }}
-        h2 {{
-            margin-bottom: 16px;
-            font-size: 18px;
-        }}
-        table {{
-            width: 100%;
-            border-collapse: collapse;
-            background: rgba(30, 41, 59, 0.8);
-            border-radius: 8px;
-            overflow: hidden;
-        }}
-        th, td {{
-            padding: 12px;
-            text-align: left;
-            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
-        }}
-        th {{
-            background: rgba(15, 23, 42, 0.5);
-            font-size: 11px;
-            text-transform: uppercase;
-            color: #64748b;
-        }}
-        tr:hover {{
-            background: rgba(51, 65, 85, 0.5);
-        }}
-        .positive {{ color: #22c55e; }}
-        .negative {{ color: #ef4444; }}
-    </style>
-</head>
-<body>
-    <h2>📊 Stock Comparison</h2>
-    <table>
-        <thead>
-            <tr>
-                <th>Stock</th>
-                <th>Price</th>
-                <th>Change</th>
-                <th>{data.get("trendLabel", "Trend")}</th>
-                <th>Market Cap</th>
-                <th>P/E</th>
-                <th>Div Yield</th>
-            </tr>
-        </thead>
-        <tbody>{rows}</tbody>
-    </table>
-</body>
-</html>'''
-
-
-# ============== Tool Handlers ==============
-
-@app.list_tools()
+@app_server.list_tools()
 async def list_tools():
-    """List available tools with UI metadata."""
     return [
         Tool(
             name="get_stock_quote",
-            description="Get current stock quote with price, change, and key metrics. Returns a rich UI card with chart.",
+            description="Get stock quote with interactive UI",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "ticker": {
-                        "type": "string",
-                        "description": "Stock ticker symbol (e.g., AAPL, MSFT, GOOGL)"
-                    },
-                    "period": {
-                        "type": "string",
-                        "description": "Chart time period: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max",
-                        "enum": ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"],
-                        "default": "1mo"
-                    }
+                    "ticker": {"type": "string", "description": "Stock ticker symbol"},
+                    "period": {"type": "string", "default": "1mo"}
                 },
                 "required": ["ticker"]
             },
-            # MCP Apps metadata - link to UI resource
-            _meta={
-                "ui": {
-                    "resourceUri": "ui://yfinance/stock-card",
-                    "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://esm.sh; connect-src 'self' https://esm.sh"
-                }
-            }
-        ),
-        Tool(
-            name="compare_stocks",
-            description="Compare multiple stocks side by side with a rich UI comparison table and sparkline charts.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "tickers": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of stock ticker symbols to compare (e.g., ['AAPL', 'MSFT', 'GOOGL'])"
-                    },
-                    "period": {
-                        "type": "string",
-                        "description": "Chart time period: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max",
-                        "enum": ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"],
-                        "default": "1mo"
-                    }
-                },
-                "required": ["tickers"]
-            },
-            _meta={
-                "ui": {
-                    "resourceUri": "ui://yfinance/comparison",
-                    "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'; script-src 'self' 'unsafe-inline' 'unsafe-eval'"
-                }
-            }
+            _meta={"ui": {"resourceUri": "ui://yfinance/stock-card"}}
         )
     ]
 
 
-@app.call_tool()
+@app_server.call_tool()
 async def call_tool(name: str, arguments: dict):
-    """Handle tool calls - return structured data for the UI."""
-    global _last_stock_data, _last_comparison_data
-    
+    print(f"[HTTP] call_tool: {name} with {arguments}", file=sys.stderr)
+
     period_labels = {
         "1d": "Today", "5d": "5 days", "1mo": "1 month", "3mo": "3 months",
-        "6mo": "6 months", "1y": "1 year", "2y": "2 years", "5y": "5 years",
-        "10y": "10 years", "ytd": "YTD", "max": "All time"
+        "6mo": "6 months", "1y": "1 year", "2y": "2 years", "5y": "5 years"
     }
-    
+
     if name == "get_stock_quote":
         ticker = arguments.get("ticker", "").upper()
         period = arguments.get("period", "1mo")
-        
+
         try:
             stock = yf.Ticker(ticker)
             info = stock.info
-            
-            # Get history for chart
-            hist = stock.history(period=period)
-            hist_close = hist["Close"].tolist() if not hist.empty else []
-            
             price = info.get("currentPrice") or info.get("regularMarketPrice")
             
-            # Calculate period change (from first price in history to current)
-            if hist_close and len(hist_close) >= 2:
-                period_start_price = hist_close[0]
-                period_change_amount = price - period_start_price
-                period_change_pct = (period_change_amount / period_start_price * 100) if period_start_price else 0
-            else:
-                # Fallback to daily change
-                prev_close = info.get("previousClose", 0)
-                period_change_amount = (price - prev_close) if price and prev_close else 0
-                period_change_pct = (period_change_amount / prev_close * 100) if prev_close else 0
+            # Get history for chart
+            period_intervals = {"1d": "5m", "5d": "15m"}
+            interval = period_intervals.get(period, "1d")
+            hist = stock.history(period=period, interval=interval)
+            hist_close = hist["Close"].tolist() if not hist.empty else []
             
-            # Return structured data that the UI will render
-            structured_data = {
+            # Calculate period change
+            if hist_close and len(hist_close) >= 2:
+                start_price = hist_close[0]
+                change_amount = price - start_price
+                change_pct = (change_amount / start_price * 100) if start_price else 0
+            else:
+                prev_close = info.get("previousClose", 0)
+                change_amount = (price - prev_close) if price and prev_close else 0
+                change_pct = (change_amount / prev_close * 100) if prev_close else 0
+
+            data = {
                 "ticker": ticker,
                 "name": info.get("longName", ticker),
                 "price": price,
-                "change": period_change_pct,
-                "changeAmount": period_change_amount,
-                "open": info.get("open"),
-                "dayHigh": info.get("dayHigh"),
-                "dayLow": info.get("dayLow"),
+                "change": change_pct,
+                "changeAmount": change_amount,
+                "period": period,
+                "periodLabel": period_labels.get(period, period),
+                "history": hist_close,
                 "volume": info.get("volume"),
                 "volumeFormatted": format_number(info.get("volume", 0)),
                 "marketCap": info.get("marketCap"),
                 "marketCapFormatted": format_number(info.get("marketCap", 0)),
                 "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh"),
                 "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow"),
-                "history": hist_close,
-                "period": period,
-                "periodLabel": period_labels.get(period, period)
+                "open": info.get("open"),
+                "dayHigh": info.get("dayHigh"),
+                "dayLow": info.get("dayLow")
             }
-            
-            # Store for embedding in UI resource
-            _last_stock_data = structured_data
-            
-            # Return structuredContent - VS Code MCP Apps will fetch the UI from the tool's _meta.ui.resourceUri
-            # and post this data to it via postMessage
+
+            print(f"[HTTP] Returning data with {len(hist_close)} history points", file=sys.stderr)
             return CallToolResult(
-                content=[TextContent(type="text", text=f"{info.get('longName', ticker)} ({ticker}): ${price:.2f} ({period_change_pct:+.2f}% over {period_labels.get(period, period)})")],
-                structuredContent=structured_data
+                content=[TextContent(type="text", text=f"{ticker}: ${price:.2f} ({change_pct:+.2f}% over {period_labels.get(period, period)})")],
+                structuredContent=data
             )
-            
         except Exception as e:
+            print(f"[HTTP] Error: {e}", file=sys.stderr)
             return CallToolResult(
-                content=[TextContent(type="text", text=f"Error fetching data for {ticker}: {str(e)}")],
+                content=[TextContent(type="text", text=f"Error: {e}")],
                 isError=True
             )
-    
-    elif name == "compare_stocks":
-        tickers = [t.upper() for t in arguments.get("tickers", [])]
-        period = arguments.get("period", "1mo")
-        
-        if not tickers:
-            return CallToolResult(
-                content=[TextContent(type="text", text="Please provide at least one ticker symbol.")],
-                isError=True
-            )
-        
-        try:
-            stocks_data = []
-            for ticker in tickers[:5]:
-                stock = yf.Ticker(ticker)
-                info = stock.info
 
-                hist = stock.history(period=period)
-                hist_close = hist["Close"].tolist() if not hist.empty else []
-
-                price = info.get("currentPrice") or info.get("regularMarketPrice")
-
-                # Calculate period change (from first price in history to current)
-                if hist_close and len(hist_close) >= 2:
-                    period_start_price = hist_close[0]
-                    period_change_amount = price - period_start_price
-                    period_change_pct = (period_change_amount / period_start_price * 100) if period_start_price else 0
-                else:
-                    # Fallback to daily change
-                    prev_close = info.get("previousClose", 0)
-                    period_change_amount = (price - prev_close) if price and prev_close else 0
-                    period_change_pct = (period_change_amount / prev_close * 100) if prev_close else 0
-
-                stocks_data.append({
-                    "ticker": ticker,
-                    "name": info.get("longName", ticker),
-                    "price": price,
-                    "change": period_change_pct,
-                    "marketCap": info.get("marketCap", 0),
-                    "marketCapFormatted": format_number(info.get("marketCap", 0)),
-                    "pe": info.get("trailingPE"),
-                    "dividend": info.get("dividendYield", 0),
-                    "history": hist_close
-                })
-            
-            trend_labels = {
-                "1d": "1D", "5d": "5D", "1mo": "1M", "3mo": "3M",
-                "6mo": "6M", "1y": "1Y", "2y": "2Y", "5y": "5Y",
-                "10y": "10Y", "ytd": "YTD", "max": "All"
-            }
-            
-            structured_data = {
-                "stocks": stocks_data,
-                "period": period,
-                "tickers": tickers,
-                "trendLabel": trend_labels.get(period, period) + " Trend"
-            }
-            
-            # Store for embedding in UI resource
-            _last_comparison_data = structured_data
-            
-            # Return structuredContent - VS Code MCP Apps will fetch the UI from the tool's _meta.ui.resourceUri
-            tickers_str = ", ".join([s["ticker"] for s in stocks_data])
-            return CallToolResult(
-                content=[TextContent(type="text", text=f"Comparison: {tickers_str}")],
-                structuredContent=structured_data
-            )
-            
-        except Exception as e:
-            return CallToolResult(
-                content=[TextContent(type="text", text=f"Error comparing stocks: {str(e)}")],
-                isError=True
-            )
-    
     return CallToolResult(
         content=[TextContent(type="text", text=f"Unknown tool: {name}")],
         isError=True
     )
 
 
-async def main():
-    """Run the MCP server."""
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(
-            read_stream,
-            write_stream,
-            app.create_initialization_options()
-        )
+# Create a single SSE transport instance (singleton)
+sse_transport = SseServerTransport("/sse")
+
+
+async def handle_sse(request: Request):
+    """Handle SSE endpoint - GET for connection, POST for messages"""
+    if request.method == "POST":
+        print(f"[HTTP] SSE POST request", file=sys.stderr)
+        await sse_transport.handle_post_message(request.scope, request.receive, request._send)
+        from starlette.responses import Response
+        return Response(status_code=202)
+    else:
+        print(f"[HTTP] SSE GET request", file=sys.stderr)
+        async with sse_transport.connect_sse(request.scope, request.receive, request._send) as (read_stream, write_stream):
+            await app_server.run(
+                read_stream,
+                write_stream,
+                app_server.create_initialization_options()
+            )
+        from starlette.responses import Response
+        return Response()
+
+
+async def health_check(request: Request):
+    """Health check endpoint to prevent connection drops"""
+    from starlette.responses import JSONResponse
+    return JSONResponse({"status": "ok"})
+
+
+starlette_app = Starlette(
+    debug=True,
+    routes=[
+        Route("/sse", endpoint=handle_sse, methods=["GET", "POST"]),
+        Route("/health", endpoint=health_check, methods=["GET"]),
+    ]
+)
 
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    print("[HTTP] Starting MCP server on http://127.0.0.1:3002", file=sys.stderr)
+    print("[HTTP] SSE endpoint: http://127.0.0.1:3002/sse", file=sys.stderr)
+    uvicorn.run(
+        starlette_app, 
+        host="127.0.0.1", 
+        port=3002, 
+        log_level="info",
+        timeout_keep_alive=120  # Keep connections alive longer
+    )
