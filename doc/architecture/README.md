@@ -7,8 +7,10 @@ This directory contains Architecture Decision Records (ADRs) for the MCP Apps St
 | ADR | Title | Status | Date |
 |-----|-------|--------|------|
 | [ADR-001](ADR-001-sse-transport.md) | SSE Transport over Stdio | Accepted | 2026-01-30 |
+| [ADR-002](ADR-002-embedded-data.md) | Embedded Data in HTML Resources | Accepted | 2026-01-30 |
 | [ADR-003](ADR-003-intraday-intervals.md) | Intraday Intervals for Short Periods | Accepted | 2026-01-30 |
 | [ADR-004](ADR-004-period-change.md) | Period Change vs Daily Change | Accepted | 2026-01-30 |
+| [ADR-005](ADR-005-client-side-switching.md) | Client-Side Period Switching | Accepted | 2026-01-30 |
 
 ## ADR Template
 
